@@ -47,6 +47,9 @@ class FauxDocker:
     def image(self, reference):
         return self.images[reference]
 
+    def plan_de_construction(self, c, construction):
+        raise KeyError(f"le service {c.service} n'a pas de section « build »")
+
     def telecharger(self, c):
         self.actions.append(f"telecharger {c.nom}")
         if self.echecs_telechargement:
@@ -264,12 +267,18 @@ class Decouverte(unittest.TestCase):
         bilan = moteur.passe()
         self.assertIn(("outil", "6.4.4", "6.5.0"), bilan.mis_a_jour)
 
-    def test_image_construite_sur_place_ignoree(self):
+    def test_image_construite_sur_place_introuvable_signalee_une_fois(self):
         moteur, docker, _ = monter(deja_a_jour=True)
         docker.ajouter("maison", "portfolio-web", None, None)
         self.assertNotIn("maison", [cc.nom for cc in moteur.conteneurs_a_traiter()])
         # ...mais la raison est notée, pour que la page puisse l'afficher
         self.assertEqual(moteur.etat.donnees["ignores"]["maison"]["etiquette"], "local")
+        moteur.passe()
+        self.assertIn("maison", moteur.notificateur.envois[0][1])
+        self.assertIn("pas mise à jour", moteur.notificateur.envois[0][1])
+        moteur.passe()
+        self.assertEqual(len(moteur.notificateur.envois), 1)   # une seule fois
+        self.assertNotIn("maison", moteur.etat.donnees["conteneurs"])   # pas de ligne fantôme
 
     def test_conteneur_ephemere_ignore(self):
         moteur, docker, _ = monter(deja_a_jour=True)

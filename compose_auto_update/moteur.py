@@ -16,6 +16,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from . import construction, decouverte, donnees, sante, versions
 from .commande import ErreurCommande, executer
@@ -37,6 +38,11 @@ CLE_LSCR = "avertissement:lscr.io"
 
 # Ce qui peut faire échouer l'examen d'UN conteneur sans arrêter la passe.
 ERREURS_EXAMEN = (ErreurRegistre, ErreurCommande, ErreurConstruction)
+
+
+def _texte(erreur):
+    """Le message d'une erreur, sans les guillemets qu'ajoute KeyError."""
+    return erreur.args[0] if isinstance(erreur, KeyError) and erreur.args else str(erreur)
 
 
 @dataclass
@@ -65,11 +71,13 @@ class Bilan:
     en_attente: list = field(default_factory=list)      # (nom, de, vers, clé)
     nouveaux: list = field(default_factory=list)        # (nom, message, clé)
     avertissements: list = field(default_factory=list)  # (nom, message, clé)
+    locaux: list = field(default_factory=list)          # (nom, raison) : images maison non suivies
     urgent: bool = False
 
     def resume(self):
         return (f"{len(self.mis_a_jour)} mise(s) à jour, {len(self.erreurs)} erreur(s), "
-                f"{len(self.en_attente)} en attente, {len(self.nouveaux)} nouveau(x)")
+                f"{len(self.en_attente)} en attente, "
+                f"{len(self.nouveaux) + len(self.locaux)} nouveau(x)")
 
 
 class Moteur:
@@ -103,18 +111,49 @@ class Moteur:
                 # l'identique : il le surveille, mais ne le touchera jamais seul.
                 liste.append(ConfConteneur(c.nom, "manuel", decouvert=True, recreable=False))
                 continue
-            _, empreintes, _, _ = self.docker.image(c.image_id)
+            donnees_c = decouverte.donnees_probables(c, tous, self.conf.racines_donnees)
+            _, empreintes, etiquettes, _ = self.docker.image(c.image_id)
             if not empreintes:
-                ignores[c.nom] = {"etiquette": "local", "raison": (
-                    "image construite sur place : aucun registre ne peut la mettre à jour. "
-                    "Déclarée dans la configuration avec « construction », elle serait "
-                    "reconstruite quand ses images de base reçoivent un correctif")}
+                cc, raison = self._construction_decouverte(c, etiquettes, donnees_c)
+                if cc:
+                    liste.append(cc)
+                else:
+                    ignores[c.nom] = {"etiquette": "local", "raison": (
+                        f"image construite sur place, pas mise à jour : {raison}. Déclare-la "
+                        f"dans la configuration avec « construction » pour qu'elle le soit")}
                 continue
-            liste.append(ConfConteneur(c.nom, self.conf.mode_decouverte,
-                                       decouverte.donnees_probables(c, tous, self.conf.racines_donnees),
-                                       decouvert=True))
+            liste.append(ConfConteneur(c.nom, self.conf.mode_decouverte, donnees_c, decouvert=True))
         self.etat.donnees["ignores"] = ignores
         return liste
+
+    def _construction_decouverte(self, c, etiquettes, donnees_c):
+        """Une image construite sur place, trouvée sur la machine : peut-on la suivre seul ?
+
+        Seulement si TOUT est vérifiable, car c'est la garantie de ne jamais
+        déployer de code : construite par Compose, dans un dépôt git, avec son
+        commit inscrit dans l'image, et un Dockerfile qui le transmet (sans quoi
+        l'image reconstruite le perdrait). Sinon : (None, la raison).
+        """
+        try:
+            contexte, chemin = self.docker.plan_de_construction(c, "compose")
+            with open(chemin, encoding="utf-8") as fichier:
+                texte = fichier.read()
+        except (ErreurCommande, OSError, KeyError, ValueError) as erreur:
+            return None, f"sa construction est introuvable ({_texte(erreur)})"
+        if not construction.bases(texte):
+            return None, "son Dockerfile n'a aucune image de base lisible"
+        depot = construction.depot_de(contexte)
+        if not depot:
+            return None, "elle n'est pas construite depuis un dépôt git"
+        if not construction.est_un_commit(etiquettes.get(construction.REVISION)):
+            return None, (f"l'image ne dit pas de quel commit elle sort "
+                          f"(étiquette {construction.REVISION})")
+        variable = construction.argument_de_revision(texte)
+        if not variable:
+            return None, "son Dockerfile n'inscrit pas le commit dans l'image"
+        return ConfConteneur(c.nom, self.conf.mode_decouverte, donnees_c, decouvert=True,
+                             construction="compose", depot=depot,
+                             arguments={variable: f"label:{construction.REVISION}"}), ""
 
     def mode_effectif(self, cc):
         """Le choix fait depuis la page prime sur la configuration.
@@ -207,7 +246,7 @@ class Moteur:
         déploiement, qui vient de télécharger ses bases avec « build --pull »).
         """
         _, _, etiquettes, _ = self.docker.image(actuel.image_id)
-        texte = self._dockerfile(cc, actuel)
+        contexte, chemin, texte = self._plan(cc, actuel)
         for base in construction.inconnues(texte):
             suivi["avertissements"].append({"cle": f"base:{base}", "message": (
                 f"l'image de base « {base} » est écrite avec une variable : elle n'est pas surveillée")})
@@ -224,7 +263,8 @@ class Moteur:
         suivi["version"] = self._libelle(finale, bases[finale]["version"]) if finale else None
         suivi["empreinte"] = None
 
-        code = self._code_modifie(cc, texte, releve, etiquettes)
+        # Ce qui construit ET lance ce service : son dossier, son Dockerfile, ses fichiers compose
+        code = self._code_modifie(cc, texte, releve, etiquettes, [contexte, chemin, *actuel.fichiers])
         blocage = self.etat.blocage(cc.nom)
         if blocage and blocage["raison"] == "code" and not code:
             self.etat.debloquer(cc.nom)       # le code a été redéployé : plus d'obstacle
@@ -262,11 +302,14 @@ class Moteur:
         return Nouveaute(cc, actuel, cle, suivi["version"], vers,
                          changements=changements, code=code)
 
-    def _dockerfile(self, cc, actuel):
+    def _plan(self, cc, actuel):
+        """(dossier de construction, chemin du Dockerfile, texte du Dockerfile)."""
         try:
-            return self.docker.dockerfile(actuel, cc.construction)
+            contexte, chemin = self.docker.plan_de_construction(actuel, cc.construction)
+            with open(chemin, encoding="utf-8") as fichier:
+                return contexte, chemin, fichier.read()
         except (OSError, KeyError, ValueError) as erreur:
-            raise ErreurConstruction(f"Dockerfile introuvable ou illisible : {erreur}") from None
+            raise ErreurConstruction(f"Dockerfile introuvable ou illisible : {_texte(erreur)}") from None
 
     def _releve_bases(self, refs):
         """Empreintes et versions des images de base, lues dans le cache local de Docker.
@@ -285,11 +328,15 @@ class Moteur:
                 analyser(base).depot, etiquettes, environnement)}
         return releve
 
-    def _code_modifie(self, cc, texte, releve, etiquettes):
+    def _code_modifie(self, cc, texte, releve, etiquettes, chemins):
         """Pourquoi la reconstruction ne serait pas identique, ou "" si elle le serait.
 
         ⚠️ C'EST LA GARANTIE QUE L'OUTIL NE DÉPLOIE JAMAIS DE CODE. Il ne change
         que les images de base ; le code, c'est ton outil de déploiement.
+
+        Le dépôt peut être en avance sur l'image : un « deploy.sh web » récupère
+        tout le dépôt mais ne reconstruit que le site. Ce n'est un obstacle pour
+        l'api que si les commits en plus touchent ce qui la construit ou la lance.
         """
         if construction.empreinte_texte(texte) != releve["dockerfile"]:
             return "le Dockerfile a changé depuis la construction de l'image en service"
@@ -302,11 +349,35 @@ class Moteur:
         en_service = etiquettes.get(construction.REVISION) or ""
         if depot and depot == en_service:
             return ""
-        if len(en_service) < 7:
+        if not construction.est_un_commit(en_service):
             return (f"l'image en service ne dit pas de quel commit elle sort "
                     f"(étiquette {construction.REVISION} : « {en_service or 'absente'} »)")
-        return (f"le dépôt est au commit {(depot or '?')[:7]}, "
-                f"l'image en service vient du commit {en_service[:7]}")
+        if not depot:
+            return f"impossible de lire le commit du dépôt {cc.depot}"
+
+        suivis = self._relatifs(cc.depot, chemins)
+        ecart = f"dépôt au commit {depot[:7]}, image au commit {en_service[:7]}"
+        try:
+            nombre = construction.commits_touchant(cc.depot, en_service, depot, suivis)
+        except (ErreurCommande, OSError, ValueError) as erreur:
+            # ⚠️ Dans le doute, on ne reconstruit pas : sans git, pas de comparaison.
+            journal.warning("%s : comparaison des commits impossible : %s", cc.nom, erreur)
+            return f"{ecart}, et la comparaison des deux est impossible (git indisponible ?)"
+        if nombre == 0:
+            return ""      # les commits en plus ne touchent pas ce service
+        return f"{nombre} commit(s) non déployé(s) touchent {', '.join(suivis)} ({ecart})"
+
+    @staticmethod
+    def _relatifs(depot, chemins):
+        """Les chemins situés dans le dépôt, relatifs à lui, pour git. Les autres sont ignorés."""
+        racine = Path(depot)
+        relatifs = []
+        for chemin in chemins:
+            try:
+                relatifs.append(Path(chemin).relative_to(racine).as_posix())
+            except ValueError:
+                continue
+        return list(dict.fromkeys(relatifs)) or ["."]
 
     def _variables(self, n):
         """Les variables de construction. « label:X » reprend l'étiquette X de l'image en service.
@@ -351,7 +422,9 @@ class Moteur:
         """La passe complète : détecter, trier, télécharger, installer, prévenir."""
         bilan = Bilan()
         a_installer = []
-        for cc in self.conteneurs_a_traiter():
+        a_traiter = self.conteneurs_a_traiter()
+        self._signaler_locaux(bilan)
+        for cc in a_traiter:
             if cc.decouvert and not self.etat.deja_notifie(cc.nom, CLE_DECOUVERTE):
                 bilan.nouveaux.append((cc.nom, self._texte_decouverte(cc), CLE_DECOUVERTE))
             try:
@@ -404,6 +477,19 @@ class Moteur:
         self._terminer(bilan)
         return bilan
 
+    def _signaler_locaux(self, bilan):
+        """Chaque image maison laissée de côté est signalée UNE fois, avec sa raison.
+
+        ⚠️ Sans ce message, elle vieillirait en silence : sa seule trace serait
+        une étiquette « local » sur la page.
+        """
+        locaux = {nom: info["raison"] for nom, info in self.etat.donnees["ignores"].items()
+                  if info["etiquette"] == "local"}
+        # Un conteneur retiré puis revenu est signalé à nouveau
+        signales = [nom for nom in self.etat.donnees.get("locaux_signales", []) if nom in locaux]
+        self.etat.donnees["locaux_signales"] = signales
+        bilan.locaux = [(nom, raison) for nom, raison in locaux.items() if nom not in signales]
+
     def _plus_rien_n_attend(self, nom):
         """À jour : un blocage n'a plus d'objet, la version attendue est en place.
 
@@ -435,6 +521,10 @@ class Moteur:
             for n in a_installer:
                 try:
                     self._obtenir(n)
+                except ErreurConstruction as erreur:
+                    # ⚠️ Pas de nouvel essai : reconstruire encore donnerait la même image.
+                    self._refuser(n, str(erreur), bilan)
+                    continue
                 except ErreurCommande as erreur:
                     journal.warning("%s : %s %d/%d raté : %s", n.conf.nom, self._obtention(n)[1],
                                     numero, len(attentes), erreur.erreur)
@@ -451,10 +541,51 @@ class Moteur:
         ⚠️ Dans les deux cas l'ancien conteneur tourne toujours : un échec ici
         n'interrompt pas le service une seconde.
         """
-        if n.conf.construction:
-            self.docker.construire(n.actuel, n.conf, self._variables(n))
-        else:
+        if not n.conf.construction:
             self.docker.telecharger(n.actuel)
+            return
+        self.docker.construire(n.actuel, n.conf, self._variables(n))
+        if not self.simulation:
+            self._verifier_commit(n)
+
+    def _verifier_commit(self, n):
+        """L'image reconstruite doit porter le même commit que celle qui tourne.
+
+        ⚠️ Sinon la variable qui le transmet est mal déclarée : l'image est
+        peut-être bonne, mais plus rien ne saurait de quel code elle sort, et le
+        garde-fou du code ne marcherait plus. On ne l'installe pas, et le nom de
+        l'image est rendu à l'ancienne.
+        """
+        c = n.actuel
+        _, _, avant, _ = self.docker.image(c.image_id)
+        attendu = avant.get(construction.REVISION)
+        if not construction.est_un_commit(attendu):
+            return
+        _, _, apres, _ = self.docker.image(c.image)
+        obtenu = apres.get(construction.REVISION)
+        if obtenu == attendu:
+            return
+        self._rendre_le_nom(c)
+        raise ErreurConstruction(
+            f"l'image reconstruite ne porte plus le commit {attendu[:7]} (étiquette : "
+            f"« {obtenu or 'absente'} ») : vérifie « arguments » dans la configuration")
+
+    def _rendre_le_nom(self, c):
+        """Refait pointer le nom de l'image vers l'ancienne, qui tourne toujours.
+
+        ⚠️ Sinon le prochain « docker compose up » installerait sans contrôle
+        l'image qui vient d'être refusée.
+        """
+        try:
+            self.docker.etiqueter(c.image_id, c.image)
+        except ErreurCommande as erreur:
+            journal.warning("%s : ancienne image non réétiquetée : %s", c.nom, erreur.erreur)
+
+    def _refuser(self, n, message, bilan):
+        """Une image reconstruite qu'on n'installe pas : le service tourne toujours sur l'ancienne."""
+        journal.error("%s : %s", n.conf.nom, message)
+        self.etat.bloquer(n.conf.nom, "construction", message)
+        bilan.erreurs.append((n.conf.nom, message, n.empreinte))
 
     @staticmethod
     def _obtention(n):
@@ -517,9 +648,7 @@ class Moteur:
         Exemple : valider la configuration de Caddy. Une configuration invalide
         empêcherait la nouvelle version de démarrer, mais AUSSI l'ancienne au
         retour arrière : sans ce contrôle, le proxy entier tomberait.
-        ⚠️ En cas d'échec, le nom de l'image est rendu à l'ancienne. Sinon le
-        prochain « docker compose up » installerait sans contrôle ce qui vient
-        d'être refusé.
+        En cas d'échec, le nom de l'image est rendu à l'ancienne.
         """
         nom, c = n.conf.nom, n.actuel
         if self.simulation:
@@ -531,10 +660,7 @@ class Moteur:
         except (ErreurCommande, OSError) as erreur:
             detail = getattr(erreur, "erreur", "") or str(erreur)
         journal.error("%s : contrôle avant installation en échec : %s", nom, detail)
-        try:
-            self.docker.etiqueter(c.image_id, c.image)
-        except ErreurCommande as erreur:
-            journal.warning("%s : ancienne image non réétiquetée : %s", nom, erreur.erreur)
+        self._rendre_le_nom(c)
         message = "le contrôle avant installation a échoué, rien n'a été touché"
         self.etat.bloquer(nom, "controle", message, detail)
         bilan.erreurs.append((nom, message, n.empreinte))
@@ -599,6 +725,8 @@ class Moteur:
         else:
             try:
                 self._obtenir(n)
+            except ErreurConstruction as erreur:
+                self._refuser(n, str(erreur), bilan)
             except ErreurCommande as erreur:
                 raison, quoi = self._obtention(n)
                 self.etat.bloquer(nom, raison, f"{quoi} impossible", erreur.erreur)
@@ -636,6 +764,10 @@ class Moteur:
     def _texte_decouverte(self, cc):
         if not cc.recreable:
             return "suivi en manuel : il n'a pas été créé par Docker Compose"
+        if cc.construction:
+            return (f"construit sur place, suivi en {cc.mode} : reconstruit quand ses images "
+                    f"de base reçoivent un correctif, toujours avec le code en service "
+                    f"(dépôt {cc.depot})")
         protege = ", ".join(cc.donnees) if cc.donnees else "aucune donnée identifiée"
         return f"suivi en {cc.mode} ; copié avant chaque mise à jour : {protege}"
 
@@ -670,6 +802,7 @@ class Moteur:
                                  *bilan.nouveaux, *bilan.avertissements]:
                 if cle:
                     self.etat.marquer_notifie(nom, cle)
+            self.etat.donnees.setdefault("locaux_signales", []).extend(nom for nom, _ in bilan.locaux)
         if not self.simulation:
             self.etat.sauver(*self.conf.exports)
 
@@ -699,7 +832,8 @@ class Moteur:
             ("Erreurs :", [f"• {nom} : {message}" for nom, message, _ in bilan.erreurs]),
             ("À faire à la main :", [f"• {nom} : {de or '?'} → {vers or '?'}"
                                      for nom, de, vers, _ in bilan.en_attente]),
-            ("Nouveaux conteneurs :", [f"• {nom} : {message}" for nom, message, _ in bilan.nouveaux]),
+            ("Nouveaux conteneurs :", [f"• {nom} : {message}" for nom, message, _ in bilan.nouveaux]
+                                      + [f"• {nom} : {raison}" for nom, raison in bilan.locaux]),
             ("À corriger :", [f"• {nom} : {message}" for nom, message, _ in bilan.avertissements]),
         ]
         lignes = []
@@ -717,8 +851,8 @@ class Moteur:
             parties = []
             if bilan.en_attente:
                 parties.append(f"{len(bilan.en_attente)} à faire à la main")
-            if bilan.nouveaux:
-                parties.append(f"{len(bilan.nouveaux)} nouveau(x) conteneur(s)")
+            if bilan.nouveaux or bilan.locaux:
+                parties.append(f"{len(bilan.nouveaux) + len(bilan.locaux)} nouveau(x) conteneur(s)")
             if bilan.avertissements:
                 parties.append(f"{len(bilan.avertissements)} à corriger")
             titre, priorite = "Mises à jour : " + ", ".join(parties), 3

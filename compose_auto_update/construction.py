@@ -7,20 +7,24 @@ l'une d'elles reçoit un correctif.
 
 ⚠️ RECONSTRUIRE AVEC LE MÊME CODE, JAMAIS AVEC UN AUTRE. Le dépôt présent sur
 la machine peut contenir des commits que personne n'a encore déployés. Les
-construire serait mettre en production sans le vouloir. On vérifie donc que le
-dépôt pointe toujours sur le commit inscrit dans l'image qui tourne, et que le
-Dockerfile n'a pas changé depuis la construction de cette image.
+construire serait mettre en production sans le vouloir. On vérifie donc que
+ces commits, s'il y en a, ne touchent pas ce qui sert à construire l'image, et
+que le Dockerfile n'a pas changé depuis la construction de l'image qui tourne.
 """
 
 import hashlib
 import re
+import shutil
 from pathlib import Path
+
+from .commande import executer
 
 REVISION = "org.opencontainers.image.revision"   # étiquette OCI standard : le commit d'origine
 
 
 class ErreurConstruction(Exception):
-    """Dockerfile ou dépôt illisible : on ne sait plus comment l'image a été construite."""
+    """Dockerfile ou dépôt illisible, ou image reconstruite qui a perdu son commit."""
+
 
 _FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.IGNORECASE | re.MULTILINE)
 
@@ -94,3 +98,57 @@ def commit_du_depot(depot):
             if ligne.endswith(" " + reference):
                 return ligne.split()[0]
     return None
+
+
+def est_un_commit(texte):
+    """Vrai pour un identifiant de commit git : 7 à 40 caractères hexadécimaux.
+
+    ⚠️ « unknown », la valeur par défaut d'une image construite à la main, n'en
+    est pas un : impossible alors de savoir de quel code elle sort.
+    """
+    return bool(re.fullmatch(r"[0-9a-f]{7,40}", texte or ""))
+
+
+_ETIQUETTE_REVISION = re.compile(
+    r"org\.opencontainers\.image\.revision\s*=\s*[\"']?\$\{?(\w+)")
+
+
+def argument_de_revision(dockerfile):
+    """Nom de l'ARG qui inscrit le commit dans l'image, ou None.
+
+    « LABEL org.opencontainers.image.revision=$GIT_SHA » donne « GIT_SHA » :
+    c'est la variable à renseigner pour que l'image reconstruite garde son commit.
+    """
+    trouve = _ETIQUETTE_REVISION.search(dockerfile)
+    return trouve.group(1) if trouve else None
+
+
+def depot_de(dossier):
+    """Le dépôt git qui contient ce dossier, en remontant vers la racine, ou None."""
+    for candidat in (Path(dossier), *Path(dossier).parents):
+        if (candidat / ".git" / "HEAD").is_file():
+            return str(candidat)
+    return None
+
+
+def commits_touchant(depot, depuis, jusqu_a, chemins):
+    """Combien de commits, entre `depuis` et `jusqu_a`, touchent ces chemins.
+
+    C'est la question qui compte : un commit qui ne modifie que le site ne
+    change rien à ce qui construit l'api. Zéro veut dire que reconstruire
+    maintenant donne exactement le code de l'image en service.
+
+    ⚠️ Le git de la machine s'il existe ; sinon celui d'un conteneur jetable
+    (image alpine/git, déjà présente), sans réseau et avec le dépôt en lecture
+    seule. UGOS n'a pas git.
+    """
+    if shutil.which("git"):
+        commande, racine = ["git"], depot
+    else:
+        commande = ["docker", "run", "--rm", "--network", "none", "--pull", "never",
+                    "--volume", f"{depot}:/depot:ro", "alpine/git"]
+        racine = "/depot"
+    # safe.directory : le dépôt appartient à un autre utilisateur que root
+    sortie = executer([*commande, "-c", f"safe.directory={racine}", "-C", racine,
+                       "rev-list", "--count", f"{depuis}..{jusqu_a}", "--", *chemins], delai=120)
+    return int(sortie.strip())

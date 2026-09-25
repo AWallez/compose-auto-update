@@ -92,25 +92,23 @@ class Docker:
         config = brut.get("Config") or {}
         return brut["Id"], empreintes, config.get("Labels") or {}, config.get("Env") or []
 
-    def dockerfile(self, c, construction):
-        """Le texte du Dockerfile d'une image construite sur place.
+    def plan_de_construction(self, c, construction):
+        """(dossier de construction, chemin du Dockerfile) d'une image construite sur place.
 
         `construction` vaut « compose » (on demande à Compose où il construit ce
         service) ou le chemin du dossier de construction.
         """
-        if construction == "compose":
-            # ⚠️ Lecture seule, mais la configuration résolue contient les valeurs
-            # du .env : on n'en garde QUE le chemin de construction, rien n'est
-            # affiché ni enregistré.
-            config = json.loads(executer(self._compose(c, "config", "--format", "json"), delai=120))
-            build = config["services"][c.service]["build"]
-            dossier = build["context"]
-            fichier = build.get("dockerfile") or "Dockerfile"
-            chemin = fichier if fichier.startswith("/") else f"{dossier}/{fichier}"
-        else:
-            chemin = f"{construction}/Dockerfile"
-        with open(chemin, encoding="utf-8") as f:
-            return f.read()
+        if construction != "compose":
+            return construction, f"{construction}/Dockerfile"
+        # ⚠️ Lecture seule, mais la configuration résolue contient les valeurs
+        # du .env : on n'en garde QUE les chemins, rien n'est affiché ni enregistré.
+        config = json.loads(executer(self._compose(c, "config", "--format", "json"), delai=120))
+        build = config["services"][c.service].get("build")
+        if not build:
+            raise KeyError(f"le service {c.service} n'a pas de section « build » dans son fichier compose")
+        dossier = build["context"]
+        fichier = build.get("dockerfile") or "Dockerfile"
+        return dossier, fichier if fichier.startswith("/") else f"{dossier}/{fichier}"
 
     # ======================================= actions, neutralisées en simulation
     def _agir(self, arguments, delai=900, env=None):
@@ -141,18 +139,18 @@ class Docker:
 
         ⚠️ `--pull` : sans lui, Docker réutilise la base gardée en cache depuis la
         dernière construction, et la reconstruction ne corrige rien.
-        `variables` (par exemple le commit, GIT_SHA) passent en variables
-        d'environnement pour Compose, qui les substitue dans son fichier, et en
-        `--build-arg` pour une construction directe.
+        `variables` (par exemple le commit, GIT_SHA) passent en `--build-arg`,
+        qui atteint directement l'ARG du Dockerfile, et, pour Compose, aussi en
+        variables d'environnement, au cas où son fichier les substitue (${GIT_SHA}).
         """
+        arguments = [f"--build-arg={cle}={valeur}" for cle, valeur in variables.items()]
         if cc.construction == "compose":
-            self._agir(self._compose(c, "build", "--pull", c.service), delai=3600, env=variables)
+            self._agir(self._compose(c, "build", "--pull", *arguments, c.service),
+                       delai=3600, env=variables)
             return
-        commande = ["docker", "build", "--pull", "--tag", c.image]
+        commande = ["docker", "build", "--pull", "--tag", c.image, *arguments]
         if cc.reseau_construction:
             commande += ["--network", cc.reseau_construction]
-        for cle, valeur in variables.items():
-            commande += ["--build-arg", f"{cle}={valeur}"]
         self._agir(commande + [cc.construction], delai=3600)
 
     def arreter(self, c):

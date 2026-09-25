@@ -61,7 +61,7 @@ Pour que son retour arrière soit complet, l'outil choisit seul ses dossiers de 
 2. **Un dossier de la machine** n'est retenu que s'il est au moins à deux niveaux sous une racine déclarée : `/volume1/docker/app/config` oui, `/volume1/docker/app` non (souvent le dossier d'une pile entière), `/volume1/docker` non plus.
 3. **Un dossier monté par un autre conteneur n'est jamais retenu** : le restaurer ferait revenir l'autre en arrière avec lui. Une médiathèque partagée est écartée par cette seule règle.
 
-Sont ignorés d'office : les images construites sur place (aucun registre à interroger, voir plus bas pour les déclarer) et les conteneurs éphémères (`docker run --rm`). Un conteneur qui n'a pas été créé par Compose est suivi, mais reste en manuel : l'outil ne saurait pas le recréer à l'identique.
+Une image construite sur place est suivie seule elle aussi, si tout est vérifiable (voir plus bas). Sinon elle est laissée de côté et **signalée une fois**, avec la raison : elle ne vieillit jamais en silence. Sont ignorés d'office les conteneurs éphémères (`docker run --rm`). Un conteneur qui n'a pas été créé par Compose est suivi, mais reste en manuel : l'outil ne saurait pas le recréer à l'identique.
 
 ## Images via lscr.io
 
@@ -84,9 +84,15 @@ segments_majeurs = 2          # nginx 1.30 → 1.32 attend ton accord
 **L'outil ne déploie jamais de code.** Il ne reconstruit qu'avec le code déjà en service :
 
 - si le Dockerfile a changé depuis la construction de l'image qui tourne, il ne reconstruit pas ;
-- avec `depot`, le commit du dépôt doit être celui inscrit dans l'image (étiquette OCI `org.opencontainers.image.revision`). Sinon, des commits non déployés attendent : l'outil s'arrête et te demande de déployer avec ton outil habituel. Le blocage se lève tout seul dès que c'est fait. Même `appliquer` refuse.
+- avec `depot`, il compare le commit du dépôt à celui inscrit dans l'image (étiquette OCI `org.opencontainers.image.revision`). S'ils diffèrent, il compte les commits en plus qui touchent ce qui construit ou lance ce service : son dossier, son Dockerfile, ses fichiers compose. Aucun : le code serait identique, il reconstruit. Au moins un : il s'arrête et te demande de déployer avec ton outil habituel, et le blocage se lève tout seul dès que c'est fait. Même `appliquer` refuse.
 
-`arguments` passe des variables à la construction : `label:X` reprend l'étiquette `X` de l'image en service, ce qui garde le même commit dans l'image reconstruite.
+Exemple : un outil de déploiement qui récupère tout le dépôt mais ne reconstruit que le site. L'api n'est bloquée que si les nouveaux commits touchent l'api.
+
+Git sert à cette comparaison : celui de la machine, ou à défaut un conteneur `alpine/git` jetable, sans réseau et avec le dépôt en lecture seule. Sans aucun des deux, l'outil ne reconstruit pas.
+
+`arguments` passe des variables à la construction : `label:X` reprend l'étiquette `X` de l'image en service, ce qui garde le même commit dans l'image reconstruite. **L'outil vérifie que c'est bien le cas** : une image reconstruite qui a perdu son commit n'est pas installée.
+
+**Sans rien écrire.** Une image construite par Compose, trouvée sur la machine, est suivie seule si tout est vérifiable : un dépôt git contient son dossier de construction, l'image porte son commit, et son Dockerfile l'y inscrit (`LABEL org.opencontainers.image.revision=$GIT_SHA`). Sinon, une notification dit ce qui manque.
 
 Les bases de référence sont relevées dans le cache local de Docker juste après chaque construction. Une image reconstruite par ton propre outil de déploiement est donc prise en compte seule, à la passe suivante, à condition qu'il construise avec `--pull`.
 

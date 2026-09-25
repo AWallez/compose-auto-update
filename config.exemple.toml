@@ -42,8 +42,8 @@ mode = "auto"
 # à deux niveaux au moins sous une racine, jamais un dossier monté par un autre
 # conteneur, et toujours les volumes gérés par Docker.
 racines_donnees = ["/srv/docker"]
-# Jamais suivis. Les images construites sur place sont déjà ignorées d'office,
-# sauf celles déclarées plus bas avec « construction ».
+# Jamais suivis. Une image construite sur place est suivie seule si tout est
+# vérifiable (dépôt git, commit inscrit dans l'image) ; sinon elle est signalée.
 exclus = []
 
 # Identifiants de registre, facultatifs : ils relèvent les limites de débit.
@@ -69,8 +69,9 @@ jeton = "ghp_remplace_moi"
 # Images construites sur place (« build: » dans le fichier compose) :
 # construction : « compose », ou le dossier du Dockerfile pour un « docker build » direct
 # reseau_construction : réseau de la construction directe, par exemple « host »
-# depot    : dépôt git du code. L'outil ne reconstruit que si son commit est
-#           celui inscrit dans l'image en service : il ne déploie jamais de code.
+# depot    : dépôt git du code. L'outil ne reconstruit que si les commits en plus
+#           dans le dépôt, s'il y en a, ne touchent pas ce service : il ne déploie
+#           jamais de code.
 # arguments : variables de construction ; « label:X » reprend l'étiquette X
 #           de l'image en service
 

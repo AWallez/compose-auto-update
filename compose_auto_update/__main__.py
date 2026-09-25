@@ -85,6 +85,8 @@ def verifier(moteur):
             print(f"{'':30}découvert ; données copiées : {', '.join(cc.donnees) or 'aucune'}")
         for avertissement in moteur.etat.conteneur(cc.nom)["avertissements"]:
             print(f"{'':30}⚠️ {avertissement['message']}")
+    for nom, info in sorted(moteur.etat.donnees.get("ignores", {}).items()):
+        print(f"{nom:22} {info['etiquette']:7} laissé de côté : {info['raison']}")
     return code
 
 
