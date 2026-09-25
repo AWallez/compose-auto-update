@@ -1,0 +1,3 @@
+# Fins de ligne Linux partout, même extrait sous Windows :
+# les unités systemd et les scripts partent tels quels sur un serveur.
+* text=auto eol=lf
