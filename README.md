@@ -1,6 +1,6 @@
 # compose-auto-update
 
-**Mises à jour automatiques de conteneurs Docker Compose, avec vérification de santé et retour arrière.**
+**Mises à jour automatiques de conteneurs Docker Compose**
 
 Chaque nuit, l'outil regarde si une nouvelle image existe pour chaque conteneur, installe celles qu'il a le droit d'installer, vérifie que le service fonctionne encore, et remet l'ancienne version, données comprises, si ce n'est pas le cas. Il ne te dérange que lorsqu'une action de ta part est nécessaire.
 
