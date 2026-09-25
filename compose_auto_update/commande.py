@@ -6,6 +6,7 @@ la même règle s'applique partout.
 """
 
 import logging
+import os
 import subprocess
 
 journal = logging.getLogger(__name__)
@@ -21,17 +22,21 @@ class ErreurCommande(Exception):
         super().__init__(f"{' '.join(arguments)} a échoué (code {code}) : {self.erreur}")
 
 
-def executer(arguments, delai=600):
+def executer(arguments, delai=600, env=None):
     """Lance une commande et renvoie sa sortie standard.
 
     ⚠️ JAMAIS DE SHELL. Les arguments sont passés en liste : un nom de conteneur
     ou un chemin qui contiendrait un espace ou un « ; » reste UN argument, il ne
     peut pas devenir une deuxième commande.
+
+    `env` AJOUTE des variables à l'environnement hérité, sans le remplacer :
+    Docker a besoin de PATH, de HOME et des autres.
     """
     journal.debug("commande : %s", " ".join(arguments))
     try:
         resultat = subprocess.run(arguments, capture_output=True, text=True,
-                                  timeout=delai, check=False)
+                                  timeout=delai, check=False,
+                                  env={**os.environ, **env} if env else None)
     except subprocess.TimeoutExpired:
         raise ErreurCommande(arguments, -1, f"délai de {delai} s dépassé") from None
     if resultat.returncode != 0:

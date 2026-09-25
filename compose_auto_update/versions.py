@@ -49,6 +49,23 @@ def majeure(version):
     return int(trouve.group(1)) if trouve else None
 
 
+def prefixe(version, segments=1):
+    """Les `segments` premiers nombres d'une version, pour comparer ce qui compte.
+
+    « 1.30.5 » donne (1,) avec 1 segment et (1, 30) avec 2 : c'est ce second
+    découpage qui fait d'un passage de nginx 1.30 à 1.32 une mise à jour
+    importante, alors que 1.30.5 → 1.30.6 ne l'est pas.
+    None si la version est illisible ou trop courte : on ne peut pas conclure.
+    """
+    if not version:
+        return None
+    trouve = re.match(r"\D*?(\d+(?:\.\d+)*)", version)
+    if not trouve:
+        return None
+    nombres = [int(n) for n in trouve.group(1).split(".")]
+    return tuple(nombres[:segments]) if len(nombres) >= segments else None
+
+
 def etiquette_fige_majeure(etiquette):
     """Vrai si l'étiquette elle-même rend toute montée majeure impossible.
 

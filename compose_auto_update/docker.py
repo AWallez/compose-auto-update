@@ -92,12 +92,33 @@ class Docker:
         config = brut.get("Config") or {}
         return brut["Id"], empreintes, config.get("Labels") or {}, config.get("Env") or []
 
+    def dockerfile(self, c, construction):
+        """Le texte du Dockerfile d'une image construite sur place.
+
+        `construction` vaut « compose » (on demande à Compose où il construit ce
+        service) ou le chemin du dossier de construction.
+        """
+        if construction == "compose":
+            # ⚠️ Lecture seule, mais la configuration résolue contient les valeurs
+            # du .env : on n'en garde QUE le chemin de construction, rien n'est
+            # affiché ni enregistré.
+            config = json.loads(executer(self._compose(c, "config", "--format", "json"), delai=120))
+            build = config["services"][c.service]["build"]
+            dossier = build["context"]
+            fichier = build.get("dockerfile") or "Dockerfile"
+            chemin = fichier if fichier.startswith("/") else f"{dossier}/{fichier}"
+        else:
+            chemin = f"{construction}/Dockerfile"
+        with open(chemin, encoding="utf-8") as f:
+            return f.read()
+
     # ======================================= actions, neutralisées en simulation
-    def _agir(self, arguments, delai=900):
+    def _agir(self, arguments, delai=900, env=None):
         if self.simulation:
-            journal.info("simulation, non exécuté : %s", " ".join(arguments))
+            journal.info("simulation, non exécuté : %s%s", " ".join(arguments),
+                         f" (variables : {env})" if env else "")
             return ""
-        return executer(arguments, delai)
+        return executer(arguments, delai, env)
 
     def _compose(self, c, *action):
         """La commande compose exacte du projet d'origine : même nom, même dossier, mêmes fichiers.
@@ -115,6 +136,25 @@ class Docker:
     def telecharger(self, c):
         self._agir(self._compose(c, "pull", "--quiet", c.service), delai=1800)
 
+    def construire(self, c, cc, variables):
+        """Reconstruit l'image d'un conteneur construit sur place, avec des bases fraîches.
+
+        ⚠️ `--pull` : sans lui, Docker réutilise la base gardée en cache depuis la
+        dernière construction, et la reconstruction ne corrige rien.
+        `variables` (par exemple le commit, GIT_SHA) passent en variables
+        d'environnement pour Compose, qui les substitue dans son fichier, et en
+        `--build-arg` pour une construction directe.
+        """
+        if cc.construction == "compose":
+            self._agir(self._compose(c, "build", "--pull", c.service), delai=3600, env=variables)
+            return
+        commande = ["docker", "build", "--pull", "--tag", c.image]
+        if cc.reseau_construction:
+            commande += ["--network", cc.reseau_construction]
+        for cle, valeur in variables.items():
+            commande += ["--build-arg", f"{cle}={valeur}"]
+        self._agir(commande + [cc.construction], delai=3600)
+
     def arreter(self, c):
         self._agir(["docker", "stop", c.nom], delai=300)
 
@@ -124,12 +164,12 @@ class Docker:
         ⚠️ `--no-deps` : on ne touche QU'À ce service. Sans lui, recréer
         qbittorrent pourrait recréer aussi gluetun, dont il dépend, et couper le
         VPN pour rien.
-        ⚠️ `--pull never` : l'image voulue est déjà là, téléchargée juste avant
-        ou remise en place par le retour arrière. Compose ne doit surtout pas
-        aller en chercher une autre de lui-même.
+        ⚠️ `--pull never` et `--no-build` : l'image voulue est déjà là,
+        téléchargée ou construite juste avant, ou remise en place par le retour
+        arrière. Compose ne doit ni en télécharger ni en construire une autre.
         """
-        self._agir(self._compose(c, "up", "--detach", "--no-deps", "--pull", "never", c.service),
-                   delai=600)
+        self._agir(self._compose(c, "up", "--detach", "--no-deps", "--pull", "never",
+                                 "--no-build", c.service), delai=600)
 
     def etiqueter(self, image_id, reference):
         self._agir(["docker", "tag", image_id, reference])

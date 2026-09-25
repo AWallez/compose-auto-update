@@ -42,7 +42,8 @@ mode = "auto"
 # à deux niveaux au moins sous une racine, jamais un dossier monté par un autre
 # conteneur, et toujours les volumes gérés par Docker.
 racines_donnees = ["/srv/docker"]
-# Jamais suivis. Les images construites sur place sont déjà ignorées d'office.
+# Jamais suivis. Les images construites sur place sont déjà ignorées d'office,
+# sauf celles déclarées plus bas avec « construction ».
 exclus = []
 
 # Identifiants de registre, facultatifs : ils relèvent les limites de débit.
@@ -58,6 +59,20 @@ jeton = "ghp_remplace_moi"
 # sante   : adresse HTTP testée après la mise à jour (tout code HTTP convient)
 # version : où lire la version, si l'image ne suit pas la norme, par exemple
 #           « env:NGINX_VERSION » ou « label:nom.de.l.etiquette »
+# segments_majeurs : combien de nombres de la version font une mise à jour
+#           « importante », qui attend ton accord. 1 par défaut (6.4 → 7.0) ;
+#           2 pour que nginx 1.30 → 1.32 compte aussi. Sans effet si l'étiquette
+#           fige déjà un numéro (« node:22-alpine ») : c'est alors elle la limite.
+# controle : commande lancée sur la nouvelle image AVANT d'arrêter l'ancienne ;
+#           si elle échoue, rien n'est touché. Une liste d'arguments, pas de shell.
+#
+# Images construites sur place (« build: » dans le fichier compose) :
+# construction : « compose », ou le dossier du Dockerfile pour un « docker build » direct
+# reseau_construction : réseau de la construction directe, par exemple « host »
+# depot    : dépôt git du code. L'outil ne reconstruit que si son commit est
+#           celui inscrit dans l'image en service : il ne déploie jamais de code.
+# arguments : variables de construction ; « label:X » reprend l'étiquette X
+#           de l'image en service
 
 [[conteneur]]
 nom = "radarr"
@@ -76,3 +91,25 @@ nom = "jellyfin"
 mode = "manuel"
 donnees = ["/srv/docker/jellyfin/config"]
 sante = "http://127.0.0.1:8096/"
+
+# Un site construit sur place, depuis node (construction) et nginx (image finale).
+# Reconstruit quand l'une de ces bases reçoit un correctif, avec le même commit.
+[[conteneur]]
+nom = "site"
+mode = "auto"
+construction = "compose"
+depot = "/srv/site"
+arguments = { GIT_SHA = "label:org.opencontainers.image.revision" }
+segments_majeurs = 2
+
+# Un proxy Caddy avec un module en plus, construit par « docker build ».
+# Sa configuration est validée sur la nouvelle image avant de toucher à l'ancienne.
+[[conteneur]]
+nom = "proxy"
+mode = "auto"
+construction = "/srv/proxy/image"
+controle = ["docker", "run", "--rm",
+            "-v", "/srv/proxy/Caddyfile:/etc/caddy/Caddyfile:ro",
+            "--entrypoint", "caddy", "proxy-maison:local",
+            "validate", "--config", "/etc/caddy/Caddyfile"]
+sante = "http://127.0.0.1:80/"

@@ -32,6 +32,15 @@ CONSEILS = {
     "retour_arriere": "URGENT : le retour à l'ancienne version a lui aussi échoué, le service est "
                       "peut-être arrêté. Les données d'avant la mise à jour sont dans le dossier "
                       "des copies.",
+    "code": "Le dépôt contient du code qui n'est pas encore en service. L'outil ne reconstruit "
+            "qu'avec le code déjà déployé : déploie cette version avec ton outil habituel, et "
+            "le blocage se lèvera tout seul à la passe suivante.",
+    "construction": "La reconstruction de l'image a échoué, rien n'a été installé : le service "
+                    "tourne toujours sur l'ancienne image. Lis l'erreur, puis relance la mise à "
+                    "jour depuis la page.",
+    "controle": "Le contrôle prévu avant l'installation a échoué : rien n'a été touché, le service "
+                "tourne toujours sur l'ancienne version. Corrige ce qu'il signale (souvent la "
+                "configuration), puis relance la mise à jour depuis la page.",
 }
 
 
@@ -57,6 +66,8 @@ class Etat:
             "empreinte": None,     # empreinte de l'image en service
             "disponible": None,    # {version, empreinte, vue_le} si une nouvelle existe
             "blocage": None,       # {raison, message, erreur, conseil, depuis}
+            # Une image construite sur place ajoute « construction » : ses images
+            # de base, l'image en service et le Dockerfile (voir moteur.py).
             "notifie": [],         # empreintes déjà signalées par notification
             "historique": [],      # derniers événements
         })

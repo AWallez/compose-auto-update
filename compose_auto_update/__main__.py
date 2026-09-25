@@ -22,12 +22,11 @@ import logging
 import sys
 
 from . import config as configuration
-from .commande import ErreurCommande
 from .docker import Docker
 from .etat import Etat
-from .moteur import Moteur
+from .moteur import ERREURS_EXAMEN, Moteur
 from .notifier import Notificateur
-from .registre import ErreurRegistre, Registre
+from .registre import Registre
 
 CONFIG_PAR_DEFAUT = "/etc/compose-auto-update/config.toml"
 VERROU = "/run/lock/compose-auto-update.lock"
@@ -65,7 +64,7 @@ def verifier(moteur):
         mode = moteur.mode_effectif(cc)
         try:
             n = moteur.examiner(cc)
-        except (ErreurRegistre, ErreurCommande) as erreur:
+        except ERREURS_EXAMEN as erreur:
             print(f"{cc.nom:22} {mode:7} ERREUR : {erreur}")
             code = 1
             continue
@@ -75,6 +74,8 @@ def verifier(moteur):
             changement = f"{n.version_actuelle or '?'} → {n.version_nouvelle or '?'}"
             if mode == "manuel" or moteur.etat.blocage(cc.nom):
                 statut = f"en attente d'une action manuelle ({changement})"
+            elif n.code:
+                statut = f"bloqué, {n.code} ({changement})"
             elif moteur.montee_majeure(n):
                 statut = f"bloqué, montée majeure ({changement})"
             else:

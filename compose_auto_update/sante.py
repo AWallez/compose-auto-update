@@ -39,20 +39,32 @@ def verifier(docker, nom, adresse=None, observation=60, delai_http=120,
     return True, ""
 
 
+class _SansRedirection(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None          # la redirection remonte alors en HTTPError : une réponse
+
+
 def _repond(adresse, delai, pas, attendre, horloge):
     """Attend que l'application réponde en HTTP.
 
     ⚠️ N'IMPORTE QUEL CODE HTTP EST UNE BONNE RÉPONSE. Un 401 ou un 403 veut
     dire que l'application tourne et refuse l'accès sans mot de passe : c'est
     exactement ce qu'on veut savoir. Seule l'absence de réponse est un échec.
+
+    ⚠️ LES REDIRECTIONS NE SONT PAS SUIVIES. Une redirection EST une réponse.
+    La suivre testerait une autre adresse : un proxy comme Caddy renvoie vers
+    https, sur un port et un nom de domaine que la vérification locale ne peut
+    pas joindre, et un service sain serait déclaré mort.
     """
+    ouvreur = urllib.request.build_opener(_SansRedirection)
     fin = horloge() + delai
     derniere = ""
     while horloge() < fin:
         try:
-            with urllib.request.urlopen(adresse, timeout=10):
+            with ouvreur.open(adresse, timeout=10):
                 return True, ""
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as reponse:
+            reponse.close()          # l'erreur porte la connexion : on la referme
             return True, ""
         except (urllib.error.URLError, TimeoutError, OSError) as erreur:
             derniere = str(erreur)

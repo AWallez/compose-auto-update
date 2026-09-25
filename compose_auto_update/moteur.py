@@ -3,6 +3,13 @@
 C'est le seul module qui DÉCIDE. Les autres savent faire une chose chacun :
 parler au registre, à Docker, copier des données, vérifier la santé. Celui-ci
 choisit quoi faire, dans quel ordre, et quoi faire quand ça rate.
+
+Deux sortes d'images passent par ici :
+  - téléchargées d'un registre : on compare leur empreinte à celle du registre ;
+  - construites sur place (option `construction`) : aucun registre ne les
+    connaît, on surveille donc leurs images de BASE et on reconstruit quand
+    l'une d'elles change. Voir construction.py.
+Ensuite tout est commun : arrêt, copie, recréation, vérification, retour arrière.
 """
 
 import logging
@@ -10,9 +17,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from . import decouverte, donnees, sante, versions
+from . import construction, decouverte, donnees, sante, versions
 from .commande import ErreurCommande, executer
 from .config import ConfConteneur
+from .construction import ErreurConstruction
 from .etat import maintenant
 from .image import analyser, sans_etiquette
 from .registre import ErreurRegistre
@@ -27,16 +35,22 @@ ETIQUETTE_SECOURS = "avant-maj"
 CLE_DECOUVERTE = "decouverte"
 CLE_LSCR = "avertissement:lscr.io"
 
+# Ce qui peut faire échouer l'examen d'UN conteneur sans arrêter la passe.
+ERREURS_EXAMEN = (ErreurRegistre, ErreurCommande, ErreurConstruction)
+
 
 @dataclass
 class Nouveaute:
-    """Une nouvelle version proposée par le registre pour un conteneur."""
+    """Une nouvelle version proposée pour un conteneur."""
     conf: object                  # ConfConteneur
     actuel: object                # docker.Conteneur, tel qu'il tourne
-    empreinte: str                # empreinte de la nouvelle image
+    empreinte: str                # empreinte de la nouvelle image (clé de notification)
     version_actuelle: str | None
     version_nouvelle: str | None
     derniere_erreur: str = ""     # dernier message d'échec de téléchargement
+    # --- images construites sur place ---
+    changements: list = field(default_factory=list)   # (base, de, vers, empreinte) par base changée
+    code: str = ""                # pourquoi on ne peut pas reconstruire à l'identique ; vide sinon
 
 
 @dataclass
@@ -69,6 +83,7 @@ class Moteur:
         self.simulation = simulation
         self.attendre = attendre
         self._plateforme = None
+        self._distantes = {}      # empreintes des images de base, demandées une fois par passe
 
     # ============================================================ qui, et comment
     def conteneurs_a_traiter(self):
@@ -91,8 +106,9 @@ class Moteur:
             _, empreintes, _, _ = self.docker.image(c.image_id)
             if not empreintes:
                 ignores[c.nom] = {"etiquette": "local", "raison": (
-                    "image construite sur place : aucun registre ne peut la mettre à jour, "
-                    "elle se met à jour en la reconstruisant")}
+                    "image construite sur place : aucun registre ne peut la mettre à jour. "
+                    "Déclarée dans la configuration avec « construction », elle serait "
+                    "reconstruite quand ses images de base reçoivent un correctif")}
                 continue
             liste.append(ConfConteneur(c.nom, self.conf.mode_decouverte,
                                        decouverte.donnees_probables(c, tous, self.conf.racines_donnees),
@@ -118,17 +134,19 @@ class Moteur:
 
     # =================================================================== détection
     def examiner(self, cc):
-        """Compare l'image en service à celle du registre. Renvoie None si à jour."""
+        """Cherche une nouvelle version. Renvoie None si le conteneur est à jour."""
         actuel = self.docker.conteneur(cc.nom)
-        ref = analyser(actuel.image)
-        _, empreintes, etiquettes, environnement = self.docker.image(actuel.image_id)
-
         suivi = self.etat.conteneur(cc.nom)
         suivi["mode"] = self.mode_effectif(cc)
         suivi["decouvert"] = cc.decouvert
+        suivi["avertissements"] = []
+        if cc.construction:
+            return self._examiner_construction(cc, actuel, suivi)
+
+        ref = analyser(actuel.image)
+        _, empreintes, etiquettes, environnement = self.docker.image(actuel.image_id)
         suivi["version"] = versions.lire(etiquettes, environnement, cc.version)
         suivi["empreinte"] = empreintes[0] if empreintes else None
-        suivi["avertissements"] = []
         if ref.registre == "lscr.io":
             # ⚠️ lscr.io n'est qu'une passerelle vers ghcr.io. Le 25/09/2026 elle
             # s'est effondrée à 4 h pile pendant que ghcr.io répondait normalement.
@@ -151,19 +169,182 @@ class Moteur:
         return Nouveaute(cc, actuel, distante, suivi["version"], nouvelle)
 
     def montee_majeure(self, n):
-        """Vrai si la nouvelle version change de majeure, ou si on ne peut pas le savoir."""
-        if versions.etiquette_fige_majeure(analyser(n.actuel.image).etiquette):
+        """Vrai si la mise à jour est importante, ou si on ne peut pas le savoir."""
+        if n.conf.construction:
+            return bool(self._bases_importantes(n))
+        return self._importante(analyser(n.actuel.image).etiquette, n.version_actuelle,
+                                n.version_nouvelle, n.conf.segments_majeurs)
+
+    @staticmethod
+    def _importante(etiquette, avant, apres, segments):
+        """Une montée de version qui mérite ton accord.
+
+        ⚠️ SI L'ÉTIQUETTE FIGE DÉJÀ UN NUMÉRO (« 2 », « 22-alpine », « v3.41.3 »),
+        c'est la limite choisie en écrivant le fichier compose : tout ce qu'elle
+        laisse passer est accepté. Sinon on compare les `segments` premiers
+        nombres : 1 pour 6.4 → 7.0, 2 pour que nginx 1.30 → 1.32 compte aussi.
+        """
+        if versions.etiquette_fige_majeure(etiquette):
             return False
-        avant = versions.majeure(n.version_actuelle)
-        apres = versions.majeure(n.version_nouvelle)
-        if avant is None or apres is None:
+        a, b = versions.prefixe(avant, segments), versions.prefixe(apres, segments)
+        if a is None or b is None:
             return True          # ⚠️ version illisible : dans le doute, on te demande
-        return apres > avant
+        return b > a
 
     def _plateforme_docker(self):
         if self._plateforme is None:
             self._plateforme = self.docker.plateforme()
         return self._plateforme
+
+    # ================================================ images construites sur place
+    def _examiner_construction(self, cc, actuel, suivi):
+        """Ses images de base ont-elles changé depuis sa construction ?
+
+        ⚠️ AUCUN REGISTRE NE CONNAÎT CETTE IMAGE. On compare donc chaque image de
+        base à celle qui a servi à la construire. Celle-ci est relevée dans le
+        cache local de Docker : juste après une reconstruction par l'outil, ou à
+        la première passe qui voit l'image (construite par ton outil de
+        déploiement, qui vient de télécharger ses bases avec « build --pull »).
+        """
+        _, _, etiquettes, _ = self.docker.image(actuel.image_id)
+        texte = self._dockerfile(cc, actuel)
+        for base in construction.inconnues(texte):
+            suivi["avertissements"].append({"cle": f"base:{base}", "message": (
+                f"l'image de base « {base} » est écrite avec une variable : elle n'est pas surveillée")})
+
+        releve = suivi.get("construction") or {}
+        if releve.get("image_id") != actuel.image_id:
+            releve = {"image_id": actuel.image_id,
+                      "dockerfile": construction.empreinte_texte(texte),
+                      "bases": self._releve_bases(construction.bases(texte))}
+            suivi["construction"] = releve
+            journal.info("%s : nouvelle image, images de base relevées", cc.nom)
+        bases = releve["bases"]
+        finale = next(reversed(bases), None)      # la base de l'image finale, celle qui tourne
+        suivi["version"] = self._libelle(finale, bases[finale]["version"]) if finale else None
+        suivi["empreinte"] = None
+
+        code = self._code_modifie(cc, texte, releve, etiquettes)
+        blocage = self.etat.blocage(cc.nom)
+        if blocage and blocage["raison"] == "code" and not code:
+            self.etat.debloquer(cc.nom)       # le code a été redéployé : plus d'obstacle
+
+        changements = []
+        for base, connu in bases.items():
+            ref = analyser(base)
+            if ref not in self._distantes:
+                self._distantes[ref] = self.registre.empreinte(ref)
+            distante = self._distantes[ref]
+            if distante in connu["empreintes"]:
+                continue
+            etiquettes_n, environnement_n = self.registre.configuration(
+                ref, distante, self._plateforme_docker())
+            changements.append((base, connu["version"],
+                                construction.version_de_base(ref.depot, etiquettes_n, environnement_n),
+                                distante))
+        if not changements:
+            suivi["disponible"] = None
+            return None
+
+        # Ce qui s'affiche : la base de l'image finale, puis ce qui a changé d'autre.
+        # « nginx 1.30.5 + node 22.23.4 » : même nginx, reconstruit avec un node corrigé.
+        nouvelles = {base: vers for base, _, vers, _ in changements}
+        libelles = [self._libelle(finale, nouvelles.get(finale, bases[finale]["version"]))]
+        libelles += [self._libelle(base, vers) for base, _, vers, _ in changements if base != finale]
+        vers = " + ".join(dict.fromkeys(libelles))
+        if vers == suivi["version"]:
+            # Même numéro, image différente : l'éditeur l'a republiée avec des
+            # correctifs (paquets Alpine, par exemple). Sans cette mention, on lirait
+            # « nginx 1.30.5 → nginx 1.30.5 » sans comprendre ce qui change.
+            vers += " (image corrigée)"
+        cle = construction.empreinte_texte("\n".join(sorted(f"{b}@{e}" for b, _, _, e in changements)))
+        suivi["disponible"] = {"version": vers, "empreinte": cle, "vue_le": maintenant()}
+        return Nouveaute(cc, actuel, cle, suivi["version"], vers,
+                         changements=changements, code=code)
+
+    def _dockerfile(self, cc, actuel):
+        try:
+            return self.docker.dockerfile(actuel, cc.construction)
+        except (OSError, KeyError, ValueError) as erreur:
+            raise ErreurConstruction(f"Dockerfile introuvable ou illisible : {erreur}") from None
+
+    def _releve_bases(self, refs):
+        """Empreintes et versions des images de base, lues dans le cache local de Docker.
+
+        ⚠️ Une base absente du cache est notée sans empreinte : elle sera vue
+        comme changée, et l'image reconstruite par prudence.
+        """
+        releve = {}
+        for base in refs:
+            try:
+                _, empreintes, etiquettes, environnement = self.docker.image(base)
+            except ErreurCommande:
+                releve[base] = {"empreintes": [], "version": None}
+                continue
+            releve[base] = {"empreintes": empreintes, "version": construction.version_de_base(
+                analyser(base).depot, etiquettes, environnement)}
+        return releve
+
+    def _code_modifie(self, cc, texte, releve, etiquettes):
+        """Pourquoi la reconstruction ne serait pas identique, ou "" si elle le serait.
+
+        ⚠️ C'EST LA GARANTIE QUE L'OUTIL NE DÉPLOIE JAMAIS DE CODE. Il ne change
+        que les images de base ; le code, c'est ton outil de déploiement.
+        """
+        if construction.empreinte_texte(texte) != releve["dockerfile"]:
+            return "le Dockerfile a changé depuis la construction de l'image en service"
+        if not cc.depot:
+            return ""
+        try:
+            depot = construction.commit_du_depot(cc.depot)
+        except OSError as erreur:
+            raise ErreurConstruction(f"dépôt {cc.depot} illisible : {erreur}") from None
+        en_service = etiquettes.get(construction.REVISION) or ""
+        if depot and depot == en_service:
+            return ""
+        if len(en_service) < 7:
+            return (f"l'image en service ne dit pas de quel commit elle sort "
+                    f"(étiquette {construction.REVISION} : « {en_service or 'absente'} »)")
+        return (f"le dépôt est au commit {(depot or '?')[:7]}, "
+                f"l'image en service vient du commit {en_service[:7]}")
+
+    def _variables(self, n):
+        """Les variables de construction. « label:X » reprend l'étiquette X de l'image en service.
+
+        C'est ainsi que GIT_SHA garde le commit d'origine : l'image reconstruite
+        porte le même, et rien ne la croit en retard sur le dépôt.
+        """
+        _, _, etiquettes, _ = self.docker.image(n.actuel.image_id)
+        variables = {}
+        for cle, valeur in n.conf.arguments.items():
+            if not valeur.startswith("label:"):
+                variables[cle] = valeur
+            elif etiquettes.get(valeur[6:]):
+                variables[cle] = etiquettes[valeur[6:]]
+        return variables
+
+    def _noter_reconstruction(self, n):
+        """Après une reconstruction réussie, les bases fraîches deviennent la référence."""
+        suivi = self.etat.conteneur(n.conf.nom)
+        releve = suivi["construction"]
+        try:
+            releve["bases"] = self._releve_bases(list(releve["bases"]))
+            releve["image_id"] = self.docker.conteneur(n.conf.nom).image_id
+        except ErreurCommande as erreur:
+            # Sans gravité : la passe suivante relèvera tout comme pour une image inconnue.
+            journal.warning("%s : relevé après reconstruction impossible : %s", n.conf.nom, erreur)
+            releve["image_id"] = None
+        finale = next(reversed(releve["bases"]), None)
+        if finale:
+            suivi["version"] = self._libelle(finale, releve["bases"][finale]["version"])
+
+    @staticmethod
+    def _libelle(base, version):
+        return f"{construction.nom_court(base)} {version or '?'}"
+
+    def _bases_importantes(self, n):
+        return [(base, de, vers) for base, de, vers, _ in n.changements
+                if self._importante(analyser(base).etiquette, de, vers, n.conf.segments_majeurs)]
 
     # ======================================================================= passe
     def passe(self):
@@ -175,7 +356,7 @@ class Moteur:
                 bilan.nouveaux.append((cc.nom, self._texte_decouverte(cc), CLE_DECOUVERTE))
             try:
                 n = self.examiner(cc)
-            except (ErreurRegistre, ErreurCommande) as erreur:
+            except ERREURS_EXAMEN as erreur:
                 journal.error("%s : vérification impossible : %s", cc.nom, erreur)
                 bilan.erreurs.append((cc.nom, f"vérification impossible : {erreur}", None))
                 continue
@@ -184,11 +365,22 @@ class Moteur:
                     bilan.avertissements.append((cc.nom, avertissement["message"], avertissement["cle"]))
             if n is None:
                 journal.info("%s : à jour", cc.nom)
+                self._plus_rien_n_attend(cc.nom)
                 continue
             if self.mode_effectif(cc) == "manuel" or self.etat.blocage(cc.nom):
                 journal.info("%s : nouvelle version %s, attend une action manuelle",
                              cc.nom, n.version_nouvelle)
                 self._en_attente(n, bilan)
+                continue
+            if n.code:
+                # « À corriger » plutôt que « à faire à la main » : le bouton de la
+                # page n'y peut rien, seul un déploiement du code lève l'obstacle.
+                journal.info("%s : reconstruction refusée, %s", cc.nom, n.code)
+                self.etat.bloquer(cc.nom, "code", n.code)
+                if not self.etat.deja_notifie(cc.nom, n.empreinte):
+                    bilan.avertissements.append((cc.nom, (
+                        f"{n.version_nouvelle} attend, mais {n.code} : déploie ce code "
+                        f"avec ton outil habituel"), n.empreinte))
                 continue
             if n.actuel.etat != "running":
                 # ⚠️ Un conteneur arrêté l'a sans doute été exprès : le recréer le
@@ -204,12 +396,24 @@ class Moteur:
 
         rates = self._telecharger_et_installer(a_installer, bilan)
         for n in rates:
-            message = f"téléchargement impossible après {1 + len(self.conf.attentes_reessai)} essais"
-            self.etat.bloquer(n.conf.nom, "telechargement", message, n.derniere_erreur)
+            raison, quoi = self._obtention(n)
+            message = f"{quoi} impossible après {1 + len(self.conf.attentes_reessai)} essais"
+            self.etat.bloquer(n.conf.nom, raison, message, n.derniere_erreur)
             bilan.erreurs.append((n.conf.nom, message, n.empreinte))
 
         self._terminer(bilan)
         return bilan
+
+    def _plus_rien_n_attend(self, nom):
+        """À jour : un blocage n'a plus d'objet, la version attendue est en place.
+
+        C'est le cas après une mise à jour faite par un autre moyen, ou un
+        redéploiement par ton outil habituel.
+        ⚠️ Sauf un retour arrière échoué : être à jour ne dit pas que le service marche.
+        """
+        blocage = self.etat.blocage(nom)
+        if blocage and blocage["raison"] != "retour_arriere":
+            self.etat.debloquer(nom)
 
     def _telecharger_et_installer(self, a_installer, bilan):
         """Télécharge et installe, avec des nouveaux essais espacés pour les ratés.
@@ -230,10 +434,10 @@ class Moteur:
             rates = []
             for n in a_installer:
                 try:
-                    self.docker.telecharger(n.actuel)
+                    self._obtenir(n)
                 except ErreurCommande as erreur:
-                    journal.warning("%s : téléchargement %d/%d raté : %s",
-                                    n.conf.nom, numero, len(attentes), erreur.erreur)
+                    journal.warning("%s : %s %d/%d raté : %s", n.conf.nom, self._obtention(n)[1],
+                                    numero, len(attentes), erreur.erreur)
                     n.derniere_erreur = erreur.erreur
                     rates.append(n)
                     continue
@@ -241,14 +445,33 @@ class Moteur:
             a_installer = rates
         return a_installer
 
+    def _obtenir(self, n):
+        """Télécharge la nouvelle image, ou reconstruit une image construite sur place.
+
+        ⚠️ Dans les deux cas l'ancien conteneur tourne toujours : un échec ici
+        n'interrompt pas le service une seconde.
+        """
+        if n.conf.construction:
+            self.docker.construire(n.actuel, n.conf, self._variables(n))
+        else:
+            self.docker.telecharger(n.actuel)
+
+    @staticmethod
+    def _obtention(n):
+        """(raison de blocage, mot pour les messages) selon la façon d'obtenir l'image."""
+        return ("construction", "reconstruction") if n.conf.construction \
+            else ("telechargement", "téléchargement")
+
     # ======================================================== une mise à jour
     def _installer(self, n, bilan):
-        """Arrêt, copie des données, recréation, vérification. Retour arrière si ça casse.
+        """Contrôle, arrêt, copie des données, recréation, vérification. Retour arrière si ça casse.
 
         ⚠️ L'ANCIEN CONTENEUR N'EST ARRÊTÉ QU'APRÈS LE TÉLÉCHARGEMENT. Si le
         registre ne répond pas, le service n'a pas été interrompu une seconde.
         """
         nom, c = n.conf.nom, n.actuel
+        if n.conf.controle and not self._controler(n, bilan):
+            return False
         horodatage = datetime.now().strftime("%Y%m%d-%H%M%S")
         copie, nouvelle_lancee = None, False
         try:
@@ -268,8 +491,11 @@ class Moteur:
             journal.info("%s : mis à jour, %s → %s", nom, n.version_actuelle, n.version_nouvelle)
             self.etat.debloquer(nom)
             suivi = self.etat.conteneur(nom)
-            suivi["version"], suivi["empreinte"], suivi["disponible"] = (
-                n.version_nouvelle, n.empreinte, None)
+            if n.conf.construction:
+                self._noter_reconstruction(n)
+            else:
+                suivi["version"], suivi["empreinte"] = n.version_nouvelle, n.empreinte
+            suivi["disponible"] = None
             self.etat.noter(nom, "mis_a_jour", f"{n.version_actuelle} → {n.version_nouvelle}")
             bilan.mis_a_jour.append((nom, n.version_actuelle, n.version_nouvelle))
             try:
@@ -285,6 +511,35 @@ class Moteur:
         self._retour_arriere(n, copie if nouvelle_lancee else None, horodatage, raison, bilan)
         return False
 
+    def _controler(self, n, bilan):
+        """Lance le contrôle prévu sur la nouvelle image, l'ancienne tournant encore.
+
+        Exemple : valider la configuration de Caddy. Une configuration invalide
+        empêcherait la nouvelle version de démarrer, mais AUSSI l'ancienne au
+        retour arrière : sans ce contrôle, le proxy entier tomberait.
+        ⚠️ En cas d'échec, le nom de l'image est rendu à l'ancienne. Sinon le
+        prochain « docker compose up » installerait sans contrôle ce qui vient
+        d'être refusé.
+        """
+        nom, c = n.conf.nom, n.actuel
+        if self.simulation:
+            journal.info("simulation, non exécuté : %s", " ".join(n.conf.controle))
+            return True
+        try:
+            executer(n.conf.controle, delai=300)
+            return True
+        except (ErreurCommande, OSError) as erreur:
+            detail = getattr(erreur, "erreur", "") or str(erreur)
+        journal.error("%s : contrôle avant installation en échec : %s", nom, detail)
+        try:
+            self.docker.etiqueter(c.image_id, c.image)
+        except ErreurCommande as erreur:
+            journal.warning("%s : ancienne image non réétiquetée : %s", nom, erreur.erreur)
+        message = "le contrôle avant installation a échoué, rien n'a été touché"
+        self.etat.bloquer(nom, "controle", message, detail)
+        bilan.erreurs.append((nom, message, n.empreinte))
+        return False
+
     def _retour_arriere(self, n, copie, horodatage, raison, bilan):
         """Remet l'ancienne image, et les anciennes données si la nouvelle version a tourné."""
         nom, c = n.conf.nom, n.actuel
@@ -295,9 +550,9 @@ class Moteur:
                 pass     # ⚠️ normal si Compose avait déjà supprimé le conteneur raté
             if copie:
                 donnees.restaurer(copie, horodatage, self.simulation)
-            # Après le téléchargement, la référence compose (« …:latest »)
-            # désigne la nouvelle image. On la refait pointer vers l'ancienne,
-            # puis on recrée : Compose relance exactement ce qui tournait avant.
+            # Après le téléchargement ou la reconstruction, la référence compose
+            # (« …:latest ») désigne la nouvelle image. On la refait pointer vers
+            # l'ancienne, puis on recrée : Compose relance exactement ce qui tournait avant.
             self.docker.etiqueter(c.image_id, c.image)
             self.docker.recreer(c)
             ok, raison_retour = self._verifier(n.conf)
@@ -329,6 +584,8 @@ class Moteur:
         demandes, après avoir lu les notes de version. Tout le reste est
         identique : copie, vérification, retour arrière. Et si elle réussit,
         un conteneur automatique bloqué redevient automatique.
+        ⚠️ SAUF UN CODE DIFFÉRENT : l'outil ne déploie jamais de code, même à
+        ta demande. C'est le rôle de ton outil de déploiement.
         """
         cc = self._trouver(nom)
         bilan = Bilan()
@@ -336,12 +593,16 @@ class Moteur:
         if n is None:
             journal.info("%s : déjà à jour", nom)
             self.etat.debloquer(nom)
+        elif n.code:
+            self.etat.bloquer(nom, "code", n.code)
+            bilan.erreurs.append((nom, f"reconstruction refusée : {n.code}", n.empreinte))
         else:
             try:
-                self.docker.telecharger(n.actuel)
+                self._obtenir(n)
             except ErreurCommande as erreur:
-                self.etat.bloquer(nom, "telechargement", "téléchargement impossible", erreur.erreur)
-                bilan.erreurs.append((nom, "téléchargement impossible", n.empreinte))
+                raison, quoi = self._obtention(n)
+                self.etat.bloquer(nom, raison, f"{quoi} impossible", erreur.erreur)
+                bilan.erreurs.append((nom, f"{quoi} impossible", n.empreinte))
             else:
                 self._installer(n, bilan)
         self._terminer(bilan)
@@ -378,9 +639,17 @@ class Moteur:
         protege = ", ".join(cc.donnees) if cc.donnees else "aucune donnée identifiée"
         return f"suivi en {cc.mode} ; copié avant chaque mise à jour : {protege}"
 
-    @staticmethod
-    def _texte_majeure(n):
-        if versions.majeure(n.version_actuelle) is None or versions.majeure(n.version_nouvelle) is None:
+    def _texte_majeure(self, n):
+        if n.conf.construction:
+            details = self._bases_importantes(n)
+            texte = "image de base à valider : " + ", ".join(
+                f"{base} {de or '?'} → {vers or '?'}" for base, de, vers in details)
+            if any(de is None or vers is None for _, de, vers in details):
+                texte += " (version illisible, validation manuelle par prudence)"
+            return texte
+        segments = n.conf.segments_majeurs
+        if versions.prefixe(n.version_actuelle, segments) is None \
+                or versions.prefixe(n.version_nouvelle, segments) is None:
             return (f"version illisible ({n.version_actuelle or '?'} → "
                     f"{n.version_nouvelle or '?'}), validation manuelle par prudence")
         return f"version majeure : {n.version_actuelle} → {n.version_nouvelle}"

@@ -29,6 +29,17 @@ class ConfConteneur:
     version: str = ""                             # où lire la version, si pas au standard
     decouvert: bool = False                       # trouvé sur la machine, absent de la configuration
     recreable: bool = True                        # faux s'il n'a pas été créé par Docker Compose
+    # Combien de nombres de la version définissent une mise à jour « importante ».
+    # 1 : 6.4 → 7.0 l'est. 2 : 1.30 → 1.32 l'est aussi (branches de nginx).
+    segments_majeurs: int = 1
+    # --- images construites sur place (vide = image téléchargée d'un registre) ---
+    construction: str = ""                        # « compose », ou dossier de construction
+    reseau_construction: str = ""                 # réseau du build direct, ex. « host »
+    arguments: dict = field(default_factory=dict) # variables de construction, ex. GIT_SHA
+    depot: str = ""                               # dépôt git : ne reconstruire qu'avec le même commit
+    # Commande lancée sur la nouvelle image AVANT d'arrêter l'ancienne, par exemple
+    # la validation d'une configuration. Si elle échoue, rien n'est touché.
+    controle: list = field(default_factory=list)
 
 
 @dataclass
@@ -95,8 +106,31 @@ def charger(chemin):
         if mode not in MODES:
             raise ErreurConfig(f"{nom} : mode {mode!r} inconnu, attendu « auto » ou « manuel »")
         donnees = [_absolu(d, nom) for d in bloc.get("donnees", [])]
-        conteneurs.append(ConfConteneur(nom, mode, donnees, bloc.get("sante", ""),
-                                        bloc.get("version", "")))
+        construction = bloc.get("construction", "")
+        if construction and construction != "compose":
+            _absolu(construction, f"{nom} : construction")
+        segments = int(bloc.get("segments_majeurs", 1))
+        if segments < 1:
+            raise ErreurConfig(f"{nom} : segments_majeurs doit valoir au moins 1")
+        arguments = dict(bloc.get("arguments", {}))
+        for cle, valeur in arguments.items():
+            if not isinstance(valeur, str):
+                raise ErreurConfig(f"{nom} : l'argument {cle} doit être une chaîne")
+        depot = bloc.get("depot", "")
+        if depot:
+            _absolu(depot, f"{nom} : depot")
+            if not construction:
+                raise ErreurConfig(f"{nom} : « depot » n'a de sens qu'avec « construction »")
+        # ⚠️ Une liste d'arguments, jamais une ligne de shell : voir commande.py
+        controle = bloc.get("controle", [])
+        if not isinstance(controle, list) or not all(isinstance(a, str) and a for a in controle):
+            raise ErreurConfig(f"{nom} : « controle » doit être une liste d'arguments, "
+                               f"par exemple [\"docker\", \"run\", …]")
+        conteneurs.append(ConfConteneur(
+            nom, mode, donnees, bloc.get("sante", ""), bloc.get("version", ""),
+            segments_majeurs=segments, construction=construction,
+            reseau_construction=bloc.get("reseau_construction", ""),
+            arguments=arguments, depot=depot, controle=controle))
 
     return Conf(
         fichier_etat=_absolu(general.get("fichier_etat",
