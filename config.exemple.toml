@@ -1,0 +1,78 @@
+# compose-auto-update : configuration d'exemple.
+#
+# Copie ce fichier en /etc/compose-auto-update/config.toml, adapte-le, puis :
+#     chmod 600 /etc/compose-auto-update/config.toml
+# ⚠️ Il contiendra des jetons : seul root doit pouvoir le lire.
+
+[general]
+# État du programme entre deux passes (JSON, sans aucun secret).
+fichier_etat = "/var/lib/compose-auto-update/etat.json"
+
+# Copies de l'état ailleurs, par exemple pour qu'un tableau de bord l'affiche.
+exports = ["/srv/tableau-de-bord/www/maj.json"]
+
+# Où ranger les copies instantanées des données avant chaque mise à jour.
+# ⚠️ OBLIGATOIREMENT sur le même volume btrfs que les données : la copie
+# instantanée (reflink) est impossible d'un système de fichiers à un autre,
+# et le programme refuse alors de faire une vraie copie à la place.
+dossier_copies = "/srv/.compose-auto-update/copies"
+copies_conservees = 3        # par conteneur ; les plus anciennes sont supprimées
+
+observation = 60             # secondes d'observation après le redémarrage
+delai_sante = 120            # secondes accordées à l'application pour répondre en HTTP
+attentes_reessai = [300, 1500]   # attentes avant le 2e et le 3e essai de téléchargement
+
+# Commandes lancées après chaque mise à jour réussie, de nuit comme à la main,
+# par exemple pour rafraîchir un tableau de bord. Chemins absolus, sans arguments.
+# Rien ne se lance si aucune mise à jour n'a eu lieu.
+apres_mise_a_jour = ["/srv/tableau-de-bord/releve-versions.sh"]
+
+[notifications]
+ntfy_url = "http://192.0.2.10:8080"      # serveur ntfy (API JSON)
+ntfy_sujet = "maj"
+ntfy_jeton = "tk_remplace_moi"
+lien = "http://192.0.2.10:3000"          # ouvert quand on touche la notification
+kuma_push = "http://192.0.2.10:3001/api/push/remplace_moi"   # sonde Push Uptime Kuma
+
+[decouverte]
+# Un conteneur qui tourne mais n'est pas déclaré plus bas est pris en charge
+# tout seul, dans ce mode, et une notification dit ce qui a été décidé pour lui.
+mode = "auto"
+# Où chercher ses dossiers de données. Trois garde-fous : seulement des dossiers
+# à deux niveaux au moins sous une racine, jamais un dossier monté par un autre
+# conteneur, et toujours les volumes gérés par Docker.
+racines_donnees = ["/srv/docker"]
+# Jamais suivis. Les images construites sur place sont déjà ignorées d'office.
+exclus = []
+
+# Identifiants de registre, facultatifs : ils relèvent les limites de débit.
+# Un jeton GitHub limité à « read:packages » suffit pour ghcr.io.
+[registres."ghcr.io"]
+utilisateur = "ton-compte"
+jeton = "ghp_remplace_moi"
+
+# ---------------------------------------------------------------- conteneurs
+# mode    : « auto » (mis à jour la nuit) ou « manuel » (signalé, jamais touché seul)
+# donnees : dossiers copiés avant chaque mise à jour. ⚠️ Liste-les à la main :
+#           jamais la médiathèque ni les téléchargements, seulement la configuration.
+# sante   : adresse HTTP testée après la mise à jour (tout code HTTP convient)
+# version : où lire la version, si l'image ne suit pas la norme, par exemple
+#           « env:NGINX_VERSION » ou « label:nom.de.l.etiquette »
+
+[[conteneur]]
+nom = "radarr"
+mode = "auto"
+donnees = ["/srv/docker/radarr/config"]
+sante = "http://127.0.0.1:7878/"
+
+[[conteneur]]
+nom = "portail"
+mode = "auto"
+version = "env:NGINX_VERSION"
+sante = "http://127.0.0.1:3000/"
+
+[[conteneur]]
+nom = "jellyfin"
+mode = "manuel"
+donnees = ["/srv/docker/jellyfin/config"]
+sante = "http://127.0.0.1:8096/"

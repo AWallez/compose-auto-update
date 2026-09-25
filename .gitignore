@@ -1,0 +1,6 @@
+# ⚠️ La vraie configuration contient des jetons : elle ne quitte jamais la machine.
+config.toml
+*.jeton
+etat*.json
+__pycache__/
+*.pyc

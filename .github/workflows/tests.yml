@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Moindre privilège : les tests n'ont besoin que de lire le code.
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests unitaires (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 3.11 : la version minimale (tomllib). La plus récente : pour voir venir.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Bibliothèque standard seule : rien à installer.
+      - name: Tests
+        run: python -m unittest discover -s tests -t . -v

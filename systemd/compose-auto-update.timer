@@ -1,0 +1,14 @@
+[Unit]
+Description=Passe quotidienne de compose-auto-update
+
+[Timer]
+# ⚠️ Jamais une heure ronde : le 25/09/2026, lscr.io s'est effondré à 4 h 00 min 01 s
+# pile, heure de pointe de toutes les tâches automatiques du monde.
+OnCalendar=*-*-* 07:10:00
+# Départ tiré au hasard dans les 10 minutes suivantes.
+RandomizedDelaySec=10min
+# Si la machine était éteinte à l'heure prévue, la passe a lieu au démarrage.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

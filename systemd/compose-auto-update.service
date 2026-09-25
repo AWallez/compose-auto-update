@@ -1,0 +1,13 @@
+[Unit]
+Description=Mises à jour des conteneurs Docker Compose (compose-auto-update)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ⚠️ Adapter le dossier où le dépôt est installé.
+WorkingDirectory=/opt/compose-auto-update
+ExecStart=/usr/bin/python3 -m compose_auto_update --config /etc/compose-auto-update/config.toml passe
+# Les réessais de téléchargement peuvent durer une demi-heure : large marge.
+TimeoutStartSec=2h
