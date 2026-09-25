@@ -18,6 +18,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import versions
+from .image import DOCKER_HUB, Reference
+
 journal = logging.getLogger(__name__)
 
 # Les quatre formats de manifeste en circulation. On les accepte tous : un
@@ -88,6 +91,44 @@ class Registre:
         config = self._json(ref, f"blobs/{manifeste['config']['digest']}", "*/*")
         contenu = config.get("config") or {}
         return contenu.get("Labels") or {}, contenu.get("Env") or []
+
+    def version_par_etiquettes(self, ref, empreinte, essais=10):
+        """La version d'une image qui n'en déclare aucune, retrouvée par ses autres noms.
+
+        Un éditeur publie la même image sous plusieurs étiquettes : « 2 », « 2.5 »,
+        « 2.5.5 ». Celle qui a la même empreinte et le plus de chiffres donne la
+        version. Renvoie None si aucune ne correspond.
+
+        - Docker Hub : UNE requête à son API donne les 100 étiquettes les plus
+          récentes avec leur empreinte.
+        - Ailleurs (ghcr.io…), la liste ne donne que les noms : on demande
+          l'empreinte des `essais` plus hautes versions, une par une, en HEAD.
+        """
+        if ref.registre == DOCKER_HUB:
+            espace, _, depot = ref.depot.partition("/")
+            page = self._hub(f"https://hub.docker.com/v2/namespaces/{espace}/repositories/"
+                             f"{depot}/tags?page_size=100", ref)
+            return versions.la_plus_precise(
+                [t["name"] for t in page.get("results") or [] if t.get("digest") == empreinte])
+
+        noms = self._json(ref, "tags/list?n=10000", "application/json").get("tags") or []
+        # Les plus hautes d'abord ; à version égale, « 3.4.0 » avant « postgresql-3.4.0 »
+        candidats = sorted((n for n in noms if versions.de_etiquette(n)), reverse=True,
+                           key=lambda n: (versions.nombres(versions.de_etiquette(n)),
+                                          n == versions.de_etiquette(n)))
+        for nom in candidats[:essais]:
+            if self.empreinte(Reference(ref.registre, ref.depot, nom)) == empreinte:
+                return versions.de_etiquette(nom)
+        return None
+
+    def _hub(self, url, ref):
+        """Une page de l'API de Docker Hub (distincte du registre, et sans jeton)."""
+        try:
+            with urllib.request.urlopen(urllib.request.Request(
+                    url, headers={"Accept": "application/json"}), timeout=self.delai) as reponse:
+                return json.loads(reponse.read())
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as erreur:
+            raise ErreurRegistre(f"{ref} : API de Docker Hub injoignable ({erreur})") from None
 
     # ============================================================== mécanique
     def _json(self, ref, chemin, accept):

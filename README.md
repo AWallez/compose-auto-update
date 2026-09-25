@@ -67,6 +67,15 @@ Une image construite sur place est suivie seule elle aussi, si tout est vérifia
 
 `lscr.io` n'est qu'une passerelle vers `ghcr.io`. Toute image qui passe encore par elle est signalée une fois, avec la correction exacte à faire dans son fichier compose.
 
+## Numéros de version
+
+Le numéro affiché, et comparé pour repérer une montée majeure, est cherché dans cet ordre :
+
+1. l'étiquette OCI `org.opencontainers.image.version` ;
+2. celle des images LinuxServer (`build_version`) ;
+3. la variable qui porte le nom du logiciel de l'image : `NGINX_VERSION` pour nginx, `PG_VERSION` pour postgres. Jamais une autre : `NODE_VERSION` dans l'image d'uptime-kuma est la version de Node.js, pas la sienne ;
+4. pour une image qui ne déclare rien, le nom d'une autre étiquette de la même image. `uptime-kuma:2` est aussi publiée sous `2.5.5`, avec la même empreinte : c'est donc la 2.5.5 qui tourne. Le résultat est gardé, le registre n'est interrogé qu'une fois par image.
+
 ## Images construites sur place
 
 Une image construite sur la machine (`build:` dans le fichier compose) n'existe dans aucun registre : personne n'annoncera sa nouvelle version. Ce qui vieillit, ce sont ses **images de base** (`FROM nginx:stable-alpine`, `FROM node:22-alpine`…), et ce sont elles que l'outil surveille. Quand l'une reçoit un correctif, l'image est reconstruite avec `--pull`, puis installée comme les autres : arrêt, recréation, vérification, retour arrière si ça casse.

@@ -17,6 +17,7 @@ import re
 import shutil
 from pathlib import Path
 
+from . import versions
 from .commande import executer
 
 REVISION = "org.opencontainers.image.revision"   # étiquette OCI standard : le commit d'origine
@@ -70,12 +71,8 @@ def version_de_base(depot, etiquettes, environnement):
     logiciel : NGINX_VERSION, NODE_VERSION, CADDY_VERSION. À défaut, l'étiquette
     OCI de version.
     """
-    nom = depot.rsplit("/", 1)[-1].upper().replace("-", "_")
-    for ligne in environnement:
-        cle, _, valeur = ligne.partition("=")
-        if cle == f"{nom}_VERSION" and valeur:
-            return valeur
-    return etiquettes.get("org.opencontainers.image.version") or None
+    return (versions.par_nom(depot, environnement)
+            or etiquettes.get("org.opencontainers.image.version") or None)
 
 
 def commit_du_depot(depot):

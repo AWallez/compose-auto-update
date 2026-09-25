@@ -84,6 +84,9 @@ class FauxRegistre:
     def configuration(self, ref, empreinte, plateforme):
         return {"org.opencontainers.image.version": self.version}, []
 
+    def version_par_etiquettes(self, ref, empreinte):
+        return None                      # aucune étiquette sœur : la version reste inconnue
+
 
 class FauxNotificateur:
     def __init__(self):

@@ -184,7 +184,8 @@ class Moteur:
 
         ref = analyser(actuel.image)
         _, empreintes, etiquettes, environnement = self.docker.image(actuel.image_id)
-        suivi["version"] = versions.lire(etiquettes, environnement, cc.version)
+        suivi["version"] = (versions.lire(etiquettes, environnement, cc.version, ref.depot)
+                            or self._version_par_etiquettes(suivi, ref, empreintes))
         suivi["empreinte"] = empreintes[0] if empreintes else None
         if ref.registre == "lscr.io":
             # ⚠️ lscr.io n'est qu'une passerelle vers ghcr.io. Le 25/09/2026 elle
@@ -203,9 +204,35 @@ class Moteur:
 
         etiquettes_n, environnement_n = self.registre.configuration(
             ref, distante, self._plateforme_docker())
-        nouvelle = versions.lire(etiquettes_n, environnement_n, cc.version)
+        nouvelle = (versions.lire(etiquettes_n, environnement_n, cc.version, ref.depot)
+                    or self._version_par_etiquettes(suivi, ref, [distante]))
         suivi["disponible"] = {"version": nouvelle, "empreinte": distante, "vue_le": maintenant()}
         return Nouveaute(cc, actuel, distante, suivi["version"], nouvelle)
+
+    def _version_par_etiquettes(self, suivi, ref, empreintes):
+        """Dernier recours pour une image sans numéro : le nom d'une autre de ses étiquettes.
+
+        Le résultat est gardé par empreinte : une image ne change jamais de
+        version, inutile de redemander chaque matin. Un échec du registre, lui,
+        n'est pas gardé, et ne fait jamais échouer la passe : la version reste
+        simplement inconnue, comme avant.
+        """
+        connues = suivi.setdefault("versions_connues", {})
+        for empreinte in empreintes:
+            if empreinte in connues:
+                return connues[empreinte]
+        for empreinte in empreintes:
+            try:
+                version = self.registre.version_par_etiquettes(ref, empreinte)
+            except ErreurRegistre as erreur:
+                journal.info("%s : version introuvable par les étiquettes : %s", ref, erreur)
+                return None
+            connues[empreinte] = version
+            while len(connues) > 4:             # seules les plus récentes servent encore
+                del connues[next(iter(connues))]
+            if version:
+                return version
+        return None
 
     def montee_majeure(self, n):
         """Vrai si la mise à jour est importante, ou si on ne peut pas le savoir."""
