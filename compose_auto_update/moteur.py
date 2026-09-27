@@ -15,7 +15,7 @@ Ensuite tout est commun : arrêt, copie, recréation, vérification, retour arri
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import construction, decouverte, donnees, sante, versions
@@ -29,7 +29,9 @@ from .registre import ErreurRegistre
 journal = logging.getLogger(__name__)
 
 # Étiquette posée sur l'ancienne image à chaque mise à jour. Elle la protège
-# du nettoyage, et permet un retour arrière à la main dans les jours qui suivent.
+# du nettoyage, et permet un retour arrière à la main dans les jours qui suivent
+# (`garder_secours_jours`). Ensuite, l'empreinte notée dans « precedente » suffit
+# à retélécharger exactement la même image.
 ETIQUETTE_SECOURS = "avant-maj"
 
 # Clés de notification qui ne sont pas des empreintes d'image.
@@ -92,6 +94,7 @@ class Moteur:
         self.attendre = attendre
         self._plateforme = None
         self._distantes = {}      # empreintes des images de base, demandées une fois par passe
+        self._secours_presents = None   # étiquettes « :avant-maj » de la machine, lues une fois
 
     # ============================================================ qui, et comment
     def conteneurs_a_traiter(self):
@@ -179,6 +182,8 @@ class Moteur:
         suivi["mode"] = self.mode_effectif(cc)
         suivi["decouvert"] = cc.decouvert
         suivi["avertissements"] = []
+        if "secours" not in suivi:
+            self._adopter_secours(suivi, actuel)
         if cc.construction:
             return self._examiner_construction(cc, actuel, suivi)
 
@@ -529,8 +534,62 @@ class Moteur:
             self.etat.bloquer(n.conf.nom, raison, message, n.derniere_erreur)
             bilan.erreurs.append((n.conf.nom, message, n.empreinte))
 
+        self._expirer_secours()
         self._terminer(bilan)
         return bilan
+
+    # ============================================================ images d'avant
+    @staticmethod
+    def _etiquette_secours(c):
+        return f"{sans_etiquette(c.image)}:{ETIQUETTE_SECOURS}"
+
+    def _adopter_secours(self, suivi, actuel):
+        """Une image de secours posée avant qu'elles n'expirent (avant le 27/09/2026).
+
+        Elle est prise en charge une fois, datée de la dernière mise à jour
+        notée : sans cela, elle resterait sur le disque pour toujours.
+        """
+        if self._secours_presents is None:
+            self._secours_presents = set(self.docker.images_de_secours())
+        etiquette = self._etiquette_secours(actuel)
+        if etiquette not in self._secours_presents:
+            suivi["secours"] = None
+            return
+        dates = [e["date"] for e in suivi.get("historique", []) if e["evenement"] == "mis_a_jour"]
+        suivi["secours"] = {"etiquette": etiquette, "depuis": dates[-1] if dates else maintenant()}
+
+    def _noter_secours(self, n, suivi):
+        """Au moment d'une mise à jour réussie : de quoi revenir à la version d'avant.
+
+        L'image elle-même, gardée quelques jours, et pour toujours son empreinte :
+        « docker pull image@empreinte » redonne exactement la même, bien après.
+        ⚠️ Le numéro de version ne suffirait pas : LinuxServer republie le même
+        numéro avec d'autres contenus. Une image construite sur place n'a pas
+        d'empreinte de registre : seule l'image gardée permet d'y revenir.
+        """
+        suivi["precedente"] = {"version": n.version_actuelle, "empreinte": suivi.get("empreinte"),
+                               "image": sans_etiquette(n.actuel.image)}
+        suivi["secours"] = {"etiquette": self._etiquette_secours(n.actuel), "depuis": maintenant()}
+
+    def _expirer_secours(self):
+        """Supprime les images d'avant gardées depuis plus de `garder_secours_jours`.
+
+        ⚠️ Jamais celle d'un conteneur bloqué : c'est peut-être elle qu'il faudra remettre.
+        """
+        limite = datetime.now().astimezone() - timedelta(days=self.conf.garder_secours_jours)
+        for nom, suivi in self.etat.donnees["conteneurs"].items():
+            secours = suivi.get("secours")
+            if not secours or suivi.get("blocage") or datetime.fromisoformat(secours["depuis"]) > limite:
+                continue
+            try:
+                self.docker.supprimer_etiquette(secours["etiquette"])
+            except ErreurCommande as erreur:
+                if "No such image" not in erreur.erreur:
+                    journal.warning("%s : image de secours non supprimée : %s", nom, erreur.erreur)
+                    continue
+            journal.info("%s : image de secours %s supprimée après %d jours",
+                         nom, secours["etiquette"], self.conf.garder_secours_jours)
+            suivi["secours"] = None
 
     def _signaler_locaux(self, bilan):
         """Chaque image maison laissée de côté est signalée UNE fois, avec sa raison.
@@ -666,7 +725,7 @@ class Moteur:
             # écriture donnerait une copie incohérente, inutilisable au retour.
             copie = donnees.copier(n.conf.donnees, self.conf.dossier_copies,
                                    nom, horodatage, self.simulation)
-            self.docker.etiqueter(c.image_id, f"{sans_etiquette(c.image)}:{ETIQUETTE_SECOURS}")
+            self.docker.etiqueter(c.image_id, self._etiquette_secours(c))
             nouvelle_lancee = True
             self.docker.recreer(c)
             ok, raison = self._verifier(n.conf)
@@ -677,6 +736,7 @@ class Moteur:
             journal.info("%s : mis à jour, %s → %s", nom, n.version_actuelle, n.version_nouvelle)
             self.etat.debloquer(nom)
             suivi = self.etat.conteneur(nom)
+            self._noter_secours(n, suivi)
             if n.conf.construction:
                 self._noter_reconstruction(n)
             else:
@@ -844,8 +904,9 @@ class Moteur:
     def _terminer(self, bilan):
         try:
             self.docker.nettoyer_images()
+            self.docker.nettoyer_cache_construction(jours=7)
         except ErreurCommande as erreur:
-            journal.warning("nettoyage des images impossible : %s", erreur.erreur)
+            journal.warning("nettoyage impossible : %s", erreur.erreur)
         self.etat.donnees["derniere_passe"] = {"fin": maintenant(), "bilan": bilan.resume()}
         if bilan.mis_a_jour:
             self._apres_mise_a_jour()

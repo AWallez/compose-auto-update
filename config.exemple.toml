@@ -17,6 +17,9 @@ exports = ["/srv/tableau-de-bord/www/maj.json"]
 # et le programme refuse alors de faire une vraie copie à la place.
 dossier_copies = "/srv/.compose-auto-update/copies"
 copies_conservees = 3        # par conteneur ; les plus anciennes sont supprimées
+# L'image d'avant chaque mise à jour (« :avant-maj ») est gardée ce nombre de
+# jours, puis supprimée. Son empreinte reste notée : de quoi la retélécharger.
+garder_secours_jours = 7
 
 observation = 60             # secondes d'observation après le redémarrage
 delai_sante = 120            # secondes accordées à l'application pour répondre en HTTP

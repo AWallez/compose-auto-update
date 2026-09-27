@@ -103,6 +103,11 @@ def afficher_etat(etat):
             ligne += f"  → {suivi['disponible'].get('version') or '?'} disponible"
         if suivi.get("blocage"):
             ligne += f"\n{'':30}BLOQUÉ ({suivi['blocage']['raison']}) : {suivi['blocage']['message']}"
+        precedente = suivi.get("precedente")
+        if precedente:
+            ou = (f"{precedente['image']}@{precedente['empreinte']}" if precedente.get("empreinte")
+                  else "image construite sur place")
+            ligne += f"\n{'':30}version d'avant : {precedente.get('version') or '?'} ({ou})"
         print(ligne)
     return 0
 

@@ -92,6 +92,11 @@ class Docker:
         config = brut.get("Config") or {}
         return brut["Id"], empreintes, config.get("Labels") or {}, config.get("Env") or []
 
+    def images_de_secours(self):
+        """Les étiquettes « …:avant-maj » présentes sur la machine."""
+        noms = executer(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"]).split()
+        return [n for n in noms if n.endswith(":avant-maj")]
+
     def plan_de_construction(self, c, construction):
         """(dossier de construction, chemin du Dockerfile) d'une image construite sur place.
 
@@ -179,3 +184,16 @@ class Docker:
         secours « :avant-maj », n'est jamais touchée.
         """
         self._agir(["docker", "image", "prune", "--force"])
+
+    def nettoyer_cache_construction(self, jours):
+        """Supprime le cache de construction inutilisé depuis `jours` jours.
+
+        Chaque construction l'agrandit, et Docker ne le nettoie jamais seul :
+        2,8 Go au 27/09/2026. Le cache récent est gardé : les reconstructions
+        restent rapides.
+        """
+        self._agir(["docker", "builder", "prune", "--force", "--filter", f"until={jours * 24}h"])
+
+    def supprimer_etiquette(self, reference):
+        """Retire une étiquette. L'image part avec elle si plus rien ne s'en sert."""
+        self._agir(["docker", "image", "rm", reference])

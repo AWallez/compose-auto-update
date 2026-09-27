@@ -59,6 +59,7 @@ class Conf:
     identifiants: dict
     conteneurs: list
     apres_mise_a_jour: list = field(default_factory=list)   # commandes lancées après une mise à jour
+    garder_secours_jours: int = 7                  # durée de vie de l'image d'avant, puis supprimée
     mode_decouverte: str = "auto"                  # mode des conteneurs découverts
     racines_donnees: list = field(default_factory=list)
     exclus: list = field(default_factory=list)     # jamais suivis, ni découverts
@@ -69,6 +70,12 @@ def _absolu(chemin, ou):
     if not PurePosixPath(chemin).is_absolute():
         raise ErreurConfig(f"{ou} : le chemin doit être absolu : {chemin!r}")
     return chemin
+
+
+def _positif(valeur, ou):
+    if int(valeur) < 0:
+        raise ErreurConfig(f"{ou} ne peut pas être négatif")
+    return int(valeur)
 
 
 def charger(chemin):
@@ -138,6 +145,7 @@ def charger(chemin):
         exports=[_absolu(e, "exports") for e in general.get("exports", [])],
         dossier_copies=_absolu(general["dossier_copies"], "dossier_copies"),
         copies_conservees=int(general.get("copies_conservees", 3)),
+        garder_secours_jours=_positif(general.get("garder_secours_jours", 7), "garder_secours_jours"),
         observation=int(general.get("observation", 60)),
         delai_sante=int(general.get("delai_sante", 120)),
         attentes_reessai=[int(a) for a in general.get("attentes_reessai", [300, 1500])],

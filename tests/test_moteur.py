@@ -6,6 +6,7 @@ faux objets ci-dessous jouent leur rôle et notent tout ce qu'on leur demande.
 
 import dataclasses
 import tempfile
+from datetime import datetime, timedelta
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,6 +25,7 @@ class FauxDocker:
         self.actions = []                   # tout ce qui aurait modifié le système
         self.echecs_telechargement = 0      # nombre de téléchargements à faire rater
         self.etats_apres_recreation = []    # état du conteneur après chaque recréation
+        self.secours = []                   # étiquettes « :avant-maj » déjà présentes
 
     def ajouter(self, nom, image, empreinte_locale, version, projet="pile",
                 etat="running", ephemere=False, montages=()):
@@ -70,6 +72,15 @@ class FauxDocker:
 
     def nettoyer_images(self):
         self.actions.append("nettoyer")
+
+    def nettoyer_cache_construction(self, jours):
+        self.actions.append(f"nettoyer-cache {jours}")
+
+    def images_de_secours(self):
+        return list(self.secours)
+
+    def supprimer_etiquette(self, reference):
+        self.actions.append(f"supprimer {reference}")
 
 
 class FauxRegistre:
@@ -123,7 +134,7 @@ class Scenarios(unittest.TestCase):
     def test_deja_a_jour_rien_ne_se_passe(self):
         moteur, docker, _ = monter(deja_a_jour=True)
         bilan = moteur.passe()
-        self.assertEqual(docker.actions, ["nettoyer"])
+        self.assertEqual(docker.actions, ["nettoyer", "nettoyer-cache 7"])
         self.assertEqual(moteur.notificateur.envois, [])     # silence : rien à signaler
         self.assertFalse(bilan.erreurs)
 
@@ -267,6 +278,66 @@ class SommaireChangeImageIdentique(unittest.TestCase):
         self.assertIsNone(moteur.etat.conteneur("radarr")["disponible"])
         moteur.passe()                                      # le lendemain : même sommaire
         self.assertEqual(moteur.registre.lectures, 1)       # retenu, plus relu
+
+
+class ImagesDeSecours(unittest.TestCase):
+    """L'image d'avant est gardée 7 jours, puis supprimée ; son empreinte reste notée."""
+
+    SECOURS = "ghcr.io/linuxserver/radarr:avant-maj"
+
+    def vieillir(self, moteur, jours):
+        suivi = moteur.etat.conteneur("radarr")
+        date = datetime.now().astimezone() - timedelta(days=jours)
+        suivi["secours"]["depuis"] = date.isoformat(timespec="seconds")
+
+    def monter(self):
+        """Un radarr mis à jour une première fois : il tourne ensuite sur la nouvelle image."""
+        moteur, docker, _ = monter()
+        moteur.passe()
+        image_id, _, etiquettes, env = docker.images["sha256:id-radarr"]
+        docker.images["sha256:id-radarr"] = (image_id, ["sha256:neuve"], etiquettes, env)
+        return moteur, docker
+
+    def test_mise_a_jour_note_de_quoi_revenir(self):
+        moteur, docker = self.monter()
+        suivi = moteur.etat.conteneur("radarr")
+        self.assertEqual(suivi["precedente"], {"version": "6.4.4", "empreinte": "sha256:vieille",
+                                               "image": "ghcr.io/linuxserver/radarr"})
+        self.assertEqual(suivi["secours"]["etiquette"], self.SECOURS)
+        self.assertNotIn(f"supprimer {self.SECOURS}", docker.actions)   # gardée pour l'instant
+
+    def test_supprimee_apres_7_jours(self):
+        moteur, docker = self.monter()
+        self.vieillir(moteur, 8)
+        moteur.passe()
+        self.assertIn(f"supprimer {self.SECOURS}", docker.actions)
+        self.assertIsNone(moteur.etat.conteneur("radarr")["secours"])
+        self.assertEqual(moteur.etat.conteneur("radarr")["precedente"]["empreinte"], "sha256:vieille")
+
+    def test_gardee_avant_7_jours(self):
+        moteur, docker = self.monter()
+        self.vieillir(moteur, 3)
+        moteur.passe()
+        self.assertNotIn(f"supprimer {self.SECOURS}", docker.actions)
+
+    def test_gardee_si_le_conteneur_est_bloque(self):
+        moteur, docker = self.monter()
+        self.vieillir(moteur, 30)
+        # une autre version attend, et le conteneur est bloqué : l'image d'avant peut resservir
+        image_id, _, etiquettes, env = docker.images["sha256:id-radarr"]
+        docker.images["sha256:id-radarr"] = (image_id, ["sha256:autre"], etiquettes, env)
+        moteur.etat.bloquer("radarr", "installation", "la nouvelle ne marche pas")
+        moteur.passe()
+        self.assertNotIn(f"supprimer {self.SECOURS}", docker.actions)
+
+    def test_image_d_avant_le_27_09_prise_en_charge(self):
+        # posée par une mise à jour du 15/09, avant que les images n'expirent
+        moteur, docker, _ = monter(deja_a_jour=True)
+        docker.secours = [self.SECOURS]
+        moteur.etat.noter("radarr", "mis_a_jour", "6.4.3 → 6.4.4")
+        moteur.etat.conteneur("radarr")["historique"][-1]["date"] = "2026-09-15T07:15:00+02:00"
+        moteur.passe()
+        self.assertIn(f"supprimer {self.SECOURS}", docker.actions)
 
 
 class Decouverte(unittest.TestCase):

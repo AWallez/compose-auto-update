@@ -32,6 +32,23 @@ Pour chaque conteneur, un à la fois :
 
 Après au moins une mise à jour réussie, les commandes listées dans `apres_mise_a_jour` sont lancées, par exemple pour qu'un tableau de bord relève les nouvelles versions tout de suite plutôt qu'au relevé suivant.
 
+**Un nouvel index n'est pas une nouvelle image.** L'empreinte comparée est celle de l'index, qui liste une image par processeur. Quand un éditeur reconstruit seulement sa version arm64, l'index change, mais l'image amd64 reste identique au bit près. Avant de télécharger, l'outil compare donc aussi l'identifiant de l'image de la machine : identique, rien n'est fait.
+
+**Ce qui reste sur le disque.** L'ancienne image est gardée sous l'étiquette `:avant-maj` pendant `garder_secours_jours` (7 par défaut), puis supprimée, sauf si le conteneur est bloqué. Le cache de construction de Docker inutilisé depuis 7 jours est supprimé aussi : chaque construction l'agrandit, et Docker ne le nettoie jamais seul.
+
+## Revenir à la main à la version d'avant
+
+Après une mise à jour réussie, la version et l'empreinte de l'image d'avant restent notées : `etat` les affiche. L'empreinte désigne une seule image, pour toujours, et les registres la gardent : c'est elle qu'il faut, pas le numéro de version, que certains éditeurs republient avec d'autres contenus.
+
+```bash
+python3 -m compose_auto_update mode radarr manuel     # sinon la passe suivante réinstallerait la nouvelle
+docker pull ghcr.io/linuxserver/radarr@sha256:…       # inutile pendant 7 jours : « :avant-maj » est là
+docker tag ghcr.io/linuxserver/radarr@sha256:… ghcr.io/linuxserver/radarr:latest
+docker compose up -d radarr                           # dans le dossier de sa pile
+```
+
+Si la nouvelle version avait converti ses données, remets aussi la copie d'avant, rangée dans le dossier des copies. Une image construite sur place n'a pas de registre : passé le délai, on y revient en redéployant l'ancien commit.
+
 ## Automatique, manuel, et manuel temporaire
 
 ```
