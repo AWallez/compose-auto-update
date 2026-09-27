@@ -198,16 +198,33 @@ class Moteur:
         # ⚠️ ON COMPARE DES EMPREINTES, PAS DES NUMÉROS DE VERSION. LinuxServer
         # reconstruit ses images sans changer le numéro de l'application : même
         # « 6.4.4 », image différente, avec des correctifs de sécurité dedans.
-        if distante in empreintes:
+        identiques = suivi.setdefault("sommaires_identiques", {})
+        if distante in empreintes or identiques.get(distante) == actuel.image_id:
             suivi["disponible"] = None
             return None
 
-        etiquettes_n, environnement_n = self.registre.configuration(
+        etiquettes_n, environnement_n, image_n = self.registre.configuration(
             ref, distante, self._plateforme_docker())
+        if image_n == actuel.image_id:
+            # ⚠️ LE SOMMAIRE A CHANGÉ, PAS L'IMAGE DE CETTE MACHINE. L'empreinte
+            # comparée est celle de l'index, qui liste une image par processeur :
+            # l'éditeur qui reconstruit seulement sa version arm64 change l'index,
+            # et l'image amd64 reste identique au bit près. Vu le 27/09/2026 :
+            # homelab, le site et Caddy « mis à jour » pour rien.
+            self._retenir(identiques, distante, image_n)
+            suivi["disponible"] = None
+            return None
         nouvelle = (versions.lire(etiquettes_n, environnement_n, cc.version, ref.depot)
                     or self._version_par_etiquettes(suivi, ref, [distante]))
         suivi["disponible"] = {"version": nouvelle, "empreinte": distante, "vue_le": maintenant()}
         return Nouveaute(cc, actuel, distante, suivi["version"], nouvelle)
+
+    @staticmethod
+    def _retenir(memoire, cle, valeur, taille=4):
+        """Ajoute à une petite mémoire de l'état, en ne gardant que les plus récents."""
+        memoire[cle] = valeur
+        while len(memoire) > taille:
+            del memoire[next(iter(memoire))]
 
     def _version_par_etiquettes(self, suivi, ref, empreintes):
         """Dernier recours pour une image sans numéro : le nom d'une autre de ses étiquettes.
@@ -227,9 +244,7 @@ class Moteur:
             except ErreurRegistre as erreur:
                 journal.info("%s : version introuvable par les étiquettes : %s", ref, erreur)
                 return None
-            connues[empreinte] = version
-            while len(connues) > 4:             # seules les plus récentes servent encore
-                del connues[next(iter(connues))]
+            self._retenir(connues, empreinte, version)
             if version:
                 return version
         return None
@@ -304,8 +319,13 @@ class Moteur:
             distante = self._distantes[ref]
             if distante in connu["empreintes"]:
                 continue
-            etiquettes_n, environnement_n = self.registre.configuration(
+            etiquettes_n, environnement_n, image_n = self.registre.configuration(
                 ref, distante, self._plateforme_docker())
+            if image_n == (connu.get("image") or self._image_locale(base)):
+                # Nouveau sommaire, même image pour ce processeur (voir examiner) :
+                # rien à reconstruire. On retient ce sommaire pour ne plus le relire.
+                connu["empreintes"] = [*connu["empreintes"], distante][-4:]
+                continue
             changements.append((base, connu["version"],
                                 construction.version_de_base(ref.depot, etiquettes_n, environnement_n),
                                 distante))
@@ -347,13 +367,21 @@ class Moteur:
         releve = {}
         for base in refs:
             try:
-                _, empreintes, etiquettes, environnement = self.docker.image(base)
+                identifiant, empreintes, etiquettes, environnement = self.docker.image(base)
             except ErreurCommande:
-                releve[base] = {"empreintes": [], "version": None}
+                releve[base] = {"empreintes": [], "image": None, "version": None}
                 continue
-            releve[base] = {"empreintes": empreintes, "version": construction.version_de_base(
-                analyser(base).depot, etiquettes, environnement)}
+            releve[base] = {"empreintes": empreintes, "image": identifiant,
+                            "version": construction.version_de_base(
+                                analyser(base).depot, etiquettes, environnement)}
         return releve
+
+    def _image_locale(self, base):
+        """Identifiant de l'image de base en cache, pour un relevé d'avant le 27/09 (sans « image »)."""
+        try:
+            return self.docker.image(base)[0]
+        except ErreurCommande:
+            return None
 
     def _code_modifie(self, cc, texte, releve, etiquettes, chemins):
         """Pourquoi la reconstruction ne serait pas identique, ou "" si elle le serait.

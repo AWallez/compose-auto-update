@@ -73,9 +73,12 @@ class ChoixDeLArchitecture(unittest.TestCase):
         }
         registre = Registre()
         registre._json = lambda ref, chemin, accept: reponses[chemin]
-        etiquettes, env = registre.configuration(analyser("ghcr.io/linuxserver/radarr"), "sha256:index", "linux/amd64")
+        etiquettes, env, image = registre.configuration(
+            analyser("ghcr.io/linuxserver/radarr"), "sha256:index", "linux/amd64")
         self.assertEqual(etiquettes["org.opencontainers.image.version"], "6.5.0")
         self.assertEqual(env, ["A=1"])
+        # l'identifiant de l'image amd64, celui que Docker lui donnerait une fois téléchargée
+        self.assertEqual(image, "sha256:conf")
 
     def test_architecture_absente(self):
         registre = Registre()

@@ -77,12 +77,15 @@ class FauxRegistre:
 
     def __init__(self, version):
         self.version = version
+        self.image = "sha256:image-neuve"     # identifiant de la nouvelle image pour ce processeur
+        self.lectures = 0
 
     def empreinte(self, ref):
         return "sha256:neuve"
 
     def configuration(self, ref, empreinte, plateforme):
-        return {"org.opencontainers.image.version": self.version}, []
+        self.lectures += 1
+        return {"org.opencontainers.image.version": self.version}, [], self.image
 
     def version_par_etiquettes(self, ref, empreinte):
         return None                      # aucune étiquette sœur : la version reste inconnue
@@ -250,6 +253,20 @@ class ModeChoisiDepuisLaPage(unittest.TestCase):
         moteur, _, _ = monter()
         with self.assertRaises(ValueError):
             moteur.choisir_mode("fantome", "auto")
+
+
+class SommaireChangeImageIdentique(unittest.TestCase):
+    """Le 27/09/2026 : l'index de nginx:alpine avait changé, pas son image amd64."""
+
+    def test_rien_n_est_telecharge_ni_redemarre(self):
+        moteur, docker, _ = monter()
+        moteur.registre.image = "sha256:id-radarr"          # la même que celle qui tourne
+        bilan = moteur.passe()
+        self.assertNotIn("telecharger radarr", docker.actions)
+        self.assertFalse(bilan.mis_a_jour)
+        self.assertIsNone(moteur.etat.conteneur("radarr")["disponible"])
+        moteur.passe()                                      # le lendemain : même sommaire
+        self.assertEqual(moteur.registre.lectures, 1)       # retenu, plus relu
 
 
 class Decouverte(unittest.TestCase):

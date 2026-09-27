@@ -125,6 +125,7 @@ class RegistreDesBases:
 
     def __init__(self, bases):
         self.bases = bases
+        self.images = {}          # sommaire → image amd64, quand elle n'est pas « base-<sommaire> »
 
     def _publiee(self, ref):
         return next(v for base, v in self.bases.items() if analyser(base) == ref)
@@ -134,7 +135,8 @@ class RegistreDesBases:
 
     def configuration(self, ref, empreinte, plateforme):
         nom = ref.depot.rsplit("/", 1)[-1].upper()
-        return {}, [f"{nom}_VERSION={self._publiee(ref)[1]}"]
+        image = self.images.get(empreinte, f"sha256:base-{empreinte}")
+        return {}, [f"{nom}_VERSION={self._publiee(ref)[1]}"], image
 
 
 def monter_web(nginx=("sha256:nginx-a", "1.30.5"), node=("sha256:node-a", "22.23.3"),
@@ -248,6 +250,30 @@ class Reconstruction(unittest.TestCase):
         moteur.passe()                   # le lendemain : toujours en attente, pas de 2e notification
         self.assertEqual(len(constructions(docker)), 1)
         self.assertEqual(len(moteur.notificateur.envois), 1)
+
+
+class SommaireChangeImageIdentique(unittest.TestCase):
+    """Le 27/09/2026 : l'index de nginx:stable-alpine avait changé, pas son image amd64."""
+
+    def test_pas_de_reconstruction(self):
+        moteur, docker = monter_web(nginx=("sha256:nginx-b", "1.30.5"))
+        moteur.registre.images["sha256:nginx-b"] = "sha256:base-sha256:nginx-a"
+        bilan = moteur.passe()
+        self.assertFalse(constructions(docker))
+        self.assertFalse(bilan.mis_a_jour)
+        releve = moteur.etat.conteneur("web")["construction"]["bases"][NGINX]
+        self.assertIn("sha256:nginx-b", releve["empreintes"])     # retenu : plus relu demain
+
+    def test_releve_d_avant_le_correctif(self):
+        # l'état de production n'avait pas encore « image » : on la prend dans le cache
+        moteur, docker = monter_web()
+        moteur.passe()
+        del moteur.etat.conteneur("web")["construction"]["bases"][NGINX]["image"]
+        docker.bases_du_registre[NGINX] = ("sha256:nginx-b", "1.30.5")
+        moteur.registre.images["sha256:nginx-b"] = "sha256:base-sha256:nginx-a"
+        moteur._distantes.clear()
+        moteur.passe()
+        self.assertFalse(constructions(docker))
 
 
 class CommitDeLImageReconstruite(unittest.TestCase):

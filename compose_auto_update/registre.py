@@ -73,11 +73,16 @@ class Registre:
         return empreinte
 
     def configuration(self, ref, empreinte, plateforme):
-        """Étiquettes et variables d'environnement d'une image, sans la télécharger.
+        """Étiquettes, variables d'environnement et identifiant d'une image, sans la télécharger.
 
         Un manifeste « index » regroupe une image par architecture : on choisit
         celle du NAS (par exemple linux/amd64), puis on lit son petit fichier
         de configuration JSON, qui contient les étiquettes.
+
+        Le troisième élément est l'empreinte de ce fichier de configuration :
+        c'est exactement l'identifiant que Docker donne à l'image une fois
+        téléchargée (« sha256:… » de `docker image inspect`). Il permet de savoir,
+        sans rien télécharger, si l'image de CETTE machine a vraiment changé.
         """
         manifeste = self._json(ref, f"manifests/{empreinte}", TYPES_MANIFESTE)
         if manifeste.get("mediaType") in TYPES_INDEX or "manifests" in manifeste:
@@ -88,9 +93,10 @@ class Registre:
             if not choix:
                 raise ErreurRegistre(f"{ref} : aucune image pour {plateforme}")
             manifeste = self._json(ref, f"manifests/{choix[0]['digest']}", TYPES_MANIFESTE)
-        config = self._json(ref, f"blobs/{manifeste['config']['digest']}", "*/*")
+        identifiant = manifeste["config"]["digest"]
+        config = self._json(ref, f"blobs/{identifiant}", "*/*")
         contenu = config.get("config") or {}
-        return contenu.get("Labels") or {}, contenu.get("Env") or []
+        return contenu.get("Labels") or {}, contenu.get("Env") or [], identifiant
 
     def version_par_etiquettes(self, ref, empreinte, essais=10):
         """La version d'une image qui n'en déclare aucune, retrouvée par ses autres noms.
