@@ -139,6 +139,19 @@ class Docker:
     def telecharger(self, c):
         self._agir(self._compose(c, "pull", "--quiet", c.service), delai=1800)
 
+    def tirer_bases(self, refs):
+        """Télécharge les images de base d'une construction, AVANT celle-ci.
+
+        ⚠️ SOUS BUILDKIT, « build --pull » NE MET PAS À JOUR LE CACHE LOCAL : il
+        construit sur les bases fraîches mais laisse leurs étiquettes locales sur
+        les anciennes. Le relevé qui suit la construction, fait dans ce cache,
+        retrouvait donc les bases d'avant, et l'image était reconstruite chaque
+        matin : portfolio-caddy, du 03/10 au 09/10/2026, « v2.11.4 → v2.11.7 »
+        tous les jours alors que la 2.11.7 tournait déjà.
+        """
+        for ref in refs:
+            self._agir(["docker", "pull", "--quiet", ref], delai=1800)
+
     def construire(self, c, cc, variables):
         """Reconstruit l'image d'un conteneur construit sur place, avec des bases fraîches.
 

@@ -63,7 +63,7 @@ class FauxDockerConstruction(FauxDocker):
         self.tags = {}                        # nom d'image → identifiant
         self.echecs_construction = 0
         self.perd_le_commit = False           # la variable du commit n'arrive pas au Dockerfile
-        self.bases_du_registre = {}           # ce que « build --pull » rapportera dans le cache
+        self.bases_du_registre = {}           # ce que « docker pull » rapportera dans le cache
 
     def mettre_en_cache(self, base, empreinte, version):
         nom = construction.nom_court(base).upper()
@@ -79,13 +79,20 @@ class FauxDockerConstruction(FauxDocker):
             raise KeyError(f"le service {c.service} n'a pas de section « build »")
         return str(self.plans[c.nom]), str(self.plans[c.nom] / "Dockerfile")
 
+    def tirer_bases(self, refs):
+        self.actions.append(f"tirer {' '.join(refs)}")
+        for base in refs:
+            if base in self.bases_du_registre:
+                empreinte, version = self.bases_du_registre[base]
+                self.mettre_en_cache(base, empreinte, version)
+
     def construire(self, c, cc, variables):
+        # ⚠️ COMME BUILDKIT : la construction utilise les bases fraîches mais NE
+        # TOUCHE PAS au cache local. Seul `tirer_bases` le met à jour.
         self.actions.append(f"construire {c.nom} {variables}")
         if self.echecs_construction:
             self.echecs_construction -= 1
             raise ErreurCommande(["docker", "compose", "build"], 1, "npm ERR! network timeout")
-        for base, (empreinte, version) in self.bases_du_registre.items():
-            self.mettre_en_cache(base, empreinte, version)
         nouvelle = f"sha256:reconstruite-{len(self.actions)}"
         commit = "unknown" if self.perd_le_commit else variables.get("GIT_SHA", "unknown")
         self.images[nouvelle] = (nouvelle, [], {REVISION: commit}, [])
@@ -195,8 +202,13 @@ class Reconstruction(unittest.TestCase):
         self.assertEqual(bilan.mis_a_jour, [("web", "nginx 1.30.5", "nginx 1.30.6")])
         self.assertEqual(moteur.etat.conteneur("web")["version"], "nginx 1.30.6")
         self.assertEqual(moteur.notificateur.envois, [])     # une réussite ne notifie pas
-        moteur.passe()                                        # le lendemain : rien à refaire
+        # Le lendemain : rien à refaire. ⚠️ Gardé du 09/10/2026 : sans bases tirées
+        # avant la construction, le cache restait sur nginx-a, et l'image était
+        # reconstruite chaque matin (portfolio-caddy, du 03/10 au 09/10).
+        moteur.passe()
         self.assertEqual(len(constructions(docker)), 1)
+        self.assertLess(docker.actions.index(f"tirer {NODE} {NGINX}"),
+                        docker.actions.index(f"construire web {{'GIT_SHA': '{COMMIT}'}}"))
 
     def test_meme_version_image_corrigee(self):
         # nginx republié avec des paquets Alpine corrigés : même numéro, autre image

@@ -658,6 +658,10 @@ class Moteur:
         if not n.conf.construction:
             self.docker.telecharger(n.actuel)
             return
+        # Les bases d'abord, pour que le relevé suivant les trouve à jour dans le
+        # cache (voir `Docker.tirer_bases`).
+        _, _, texte = self._plan(n.conf, n.actuel)
+        self.docker.tirer_bases(construction.bases(texte))
         self.docker.construire(n.actuel, n.conf, self._variables(n))
         if not self.simulation:
             self._verifier_commit(n)
