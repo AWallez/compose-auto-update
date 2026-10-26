@@ -2,6 +2,8 @@
 
 Commandes :
   verifier        ce qui serait mis à jour ; ne télécharge ni ne modifie rien
+  releve          note les versions disponibles pour le tableau de bord, sans
+                  rien télécharger ni installer (minuterie de la journée)
   passe           la passe complète, celle que lance la minuterie systemd
   appliquer NOM   met un conteneur à jour tout de suite (bouton de la page)
   mode NOM CHOIX  bascule un conteneur : auto, manuel, ou defaut (celui de la configuration)
@@ -120,6 +122,7 @@ def main(argv=None):
     parseur.add_argument("--bavard", action="store_true")
     commandes = parseur.add_subparsers(dest="commande", required=True)
     commandes.add_parser("verifier")
+    commandes.add_parser("releve")
     commandes.add_parser("passe")
     commandes.add_parser("appliquer").add_argument("nom")
     choix = commandes.add_parser("mode")
@@ -156,6 +159,11 @@ def main(argv=None):
             if args.commande == "mode":
                 moteur.choisir_mode(args.nom, None if args.choix == "defaut" else args.choix)
                 journal.info("%s : mode %s enregistré", args.nom, args.choix)
+                return 0
+            if args.commande == "releve":
+                # ⚠️ Sous le même verrou que la passe : les deux écrivent l'état.
+                journal.info("relevé : %d conteneur(s) attendent une nouvelle version",
+                             moteur.releve())
                 return 0
             bilan = moteur.passe() if args.commande == "passe" else moteur.appliquer(args.nom)
     except PasseEnCours:

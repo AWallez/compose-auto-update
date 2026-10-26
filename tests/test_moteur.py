@@ -5,6 +5,7 @@ faux objets ci-dessous jouent leur rôle et notent tout ce qu'on leur demande.
 """
 
 import dataclasses
+import json
 import tempfile
 from datetime import datetime, timedelta
 import unittest
@@ -235,6 +236,49 @@ class Scenarios(unittest.TestCase):
         moteur, docker, _ = monter(actuelle="6.4.4", nouvelle="7.0.0")
         bilan = moteur.appliquer("radarr")
         self.assertEqual(len(bilan.mis_a_jour), 1)
+
+
+class Releve(unittest.TestCase):
+    """Le relevé de la journée : il note ce qui attend, sans rien toucher."""
+
+    def test_note_la_version_sans_rien_telecharger_ni_installer(self):
+        moteur, docker, _ = monter()
+        self.assertEqual(moteur.releve(), 1)
+        self.assertEqual(docker.actions, [])
+        self.assertEqual(moteur.etat.conteneur("radarr")["disponible"]["version"], "6.5.0")
+        self.assertEqual(moteur.notificateur.envois, [])
+
+    def test_un_manuel_n_est_notifie_qu_a_la_passe(self):
+        moteur, _, _ = monter(mode="manuel")
+        moteur.releve()
+        self.assertEqual(moteur.notificateur.envois, [])
+        moteur.passe()
+        self.assertEqual(len(moteur.notificateur.envois), 1)
+
+    def test_ne_touche_pas_a_la_derniere_passe(self):
+        # ⚠️ Le tableau de bord juge sur elle que la passe a bien eu lieu
+        moteur, _, _ = monter(deja_a_jour=True)
+        moteur.passe()
+        passe = moteur.etat.donnees["derniere_passe"]
+        self.assertEqual(moteur.releve(), 0)
+        self.assertEqual(moteur.etat.donnees["derniere_passe"], passe)
+        self.assertEqual(moteur.etat.donnees["dernier_releve"]["disponibles"], 0)
+
+    def test_ecrit_l_etat_et_sa_copie_pour_la_page(self):
+        moteur, _, _ = monter()
+        copie = Path(moteur.conf.fichier_etat).with_name("maj.json")
+        moteur.conf = dataclasses.replace(moteur.conf, exports=[str(copie)])
+        moteur.releve()
+        donnees = json.loads(copie.read_text(encoding="utf-8"))
+        self.assertEqual(donnees["dernier_releve"]["disponibles"], 1)
+        self.assertIsNotNone(donnees["conteneurs"]["radarr"]["disponible"])
+
+    def test_la_passe_installe_ensuite_ce_que_le_releve_a_vu(self):
+        moteur, docker, _ = monter()
+        moteur.releve()
+        bilan = moteur.passe()
+        self.assertEqual(bilan.mis_a_jour, [("radarr", "6.4.4", "6.5.0")])
+        self.assertIsNone(moteur.etat.conteneur("radarr")["disponible"])
 
 
 class ModeChoisiDepuisLaPage(unittest.TestCase):

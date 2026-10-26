@@ -161,11 +161,22 @@ systemctl daemon-reload
 systemctl enable --now compose-auto-update.timer
 ```
 
+Si un tableau de bord lit l'état, le **relevé** de la journée lui donne les nouvelles versions sans attendre la passe. Il ne télécharge, n'installe et ne notifie rien : il interroge les registres (de simples requêtes d'empreinte) et note ce qui attend. Facultatif :
+
+```bash
+cp systemd/compose-auto-update-releve.* /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now compose-auto-update-releve.timer
+```
+
+Le relevé note son heure dans `dernier_releve` et ne touche jamais `derniere_passe` : un tableau de bord qui surveille la passe ne doit pas être trompé par un relevé quand la passe ne tourne plus.
+
 ## Commandes
 
 | Commande | Effet |
 |---|---|
 | `verifier` | Ce qui serait fait. Ne télécharge et ne modifie rien. |
+| `releve` | Note les versions disponibles dans l'état, pour un tableau de bord. N'installe et ne notifie rien. |
 | `passe` | La passe complète, celle que lance la minuterie. |
 | `appliquer NOM` | Met un conteneur à jour tout de suite, même bloqué ou face à une majeure, jamais avec un code non déployé. |
 | `mode NOM auto\|manuel\|defaut` | Bascule un conteneur ; `defaut` rend la main à la configuration. |

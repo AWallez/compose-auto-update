@@ -538,6 +538,34 @@ class Moteur:
         self._terminer(bilan)
         return bilan
 
+    def releve(self):
+        """Le relevé léger, plusieurs fois par jour : quelles versions attendent ?
+
+        Elles sont notées pour le tableau de bord (`disponible`), sans RIEN
+        télécharger, installer ni notifier : seule la passe installe et
+        prévient, à l'heure creuse choisie. Renvoie le nombre de conteneurs
+        qui attendent une nouvelle version.
+
+        ⚠️ `derniere_passe` N'EST PAS TOUCHÉE. Un tableau de bord juge sur elle
+        que la passe a bien eu lieu : rafraîchie par le relevé, elle masquerait
+        une passe en panne. Le relevé note sa propre heure, `dernier_releve`.
+        """
+        attendent = 0
+        for cc in self.conteneurs_a_traiter():
+            try:
+                n = self.examiner(cc)
+            except ERREURS_EXAMEN as erreur:
+                journal.warning("%s : relevé impossible : %s", cc.nom, erreur)
+                continue
+            if n is not None:
+                attendent += 1
+                journal.info("%s : %s → %s disponible", cc.nom,
+                             n.version_actuelle or "?", n.version_nouvelle or "?")
+        self.etat.donnees["dernier_releve"] = {"fin": maintenant(), "disponibles": attendent}
+        if not self.simulation:
+            self.etat.sauver(*self.conf.exports)
+        return attendent
+
     # ============================================================ images d'avant
     @staticmethod
     def _etiquette_secours(c):

@@ -1,0 +1,11 @@
+[Unit]
+Description=Relevé des versions disponibles (compose-auto-update), sans rien installer
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/compose-auto-update
+ExecStart=/usr/bin/python3 -m compose_auto_update --config /etc/compose-auto-update/config.toml releve
+TimeoutStartSec=30min

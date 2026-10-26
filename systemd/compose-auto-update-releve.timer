@@ -1,0 +1,11 @@
+[Unit]
+Description=Relevé des versions disponibles, plusieurs fois par jour
+
+[Timer]
+# Toutes les trois heures en journée : la passe du matin s'occupe de la nuit.
+# ⚠️ Jamais une heure ronde, comme la passe (voir compose-auto-update.timer).
+OnCalendar=*-*-* 10,13,16,19,22:25:00
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
