@@ -27,6 +27,13 @@ class FauxDocker:
         self.echecs_telechargement = 0      # nombre de téléchargements à faire rater
         self.etats_apres_recreation = []    # état du conteneur après chaque recréation
         self.secours = []                   # étiquettes « :avant-maj » déjà présentes
+        # Comme Docker : un nom d'image désigne un identifiant. « pull » le fait
+        # pointer vers la nouvelle image, « tag » le déplace, et la recréation
+        # lance l'image que le nom désigne à ce moment-là.
+        self.tags = {}
+        self.image_telechargee = "sha256:image-neuve"
+        self.version_telechargee = None
+        self.telechargement_sans_effet = False   # « pull » réussi qui ne change rien (miroir figé…)
 
     def ajouter(self, nom, image, empreinte_locale, version, projet="pile",
                 etat="running", ephemere=False, montages=()):
@@ -58,18 +65,28 @@ class FauxDocker:
         if self.echecs_telechargement:
             self.echecs_telechargement -= 1
             raise ErreurCommande(["docker", "compose", "pull"], 1, "TLS handshake timeout")
+        if self.telechargement_sans_effet:
+            return
+        neuve = self.image_telechargee
+        self.images.setdefault(neuve, (neuve, ["sha256:neuve"],
+                                       {"org.opencontainers.image.version": self.version_telechargee}, []))
+        self.tags[c.image] = neuve
 
     def arreter(self, c):
         self.actions.append(f"arreter {c.nom}")
 
     def recreer(self, c):
         self.actions.append(f"recreer {c.nom}")
+        if c.image in self.tags:
+            self.conteneurs[c.nom] = dataclasses.replace(self.conteneurs[c.nom],
+                                                         image_id=self.tags[c.image])
         if self.etats_apres_recreation:
             etat = self.etats_apres_recreation.pop(0)
             self.conteneurs[c.nom] = dataclasses.replace(self.conteneurs[c.nom], etat=etat)
 
     def etiqueter(self, image_id, reference):
         self.actions.append(f"etiqueter {image_id} {reference}")
+        self.tags[reference] = image_id
 
     def nettoyer_images(self):
         self.actions.append("nettoyer")
@@ -125,6 +142,7 @@ def monter(mode="auto", actuelle="6.4.4", nouvelle="6.5.0", etiquette="latest",
     docker = FauxDocker()
     docker.ajouter("radarr", f"{registre}/linuxserver/radarr:{etiquette}",
                    "sha256:neuve" if deja_a_jour else "sha256:vieille", actuelle, etat=etat)
+    docker.version_telechargee = nouvelle
     attentes = []
     moteur = Moteur(conf, docker, FauxRegistre(nouvelle), Etat(conf.fichier_etat),
                     FauxNotificateur(), attendre=attentes.append)
@@ -338,8 +356,7 @@ class ImagesDeSecours(unittest.TestCase):
         """Un radarr mis à jour une première fois : il tourne ensuite sur la nouvelle image."""
         moteur, docker, _ = monter()
         moteur.passe()
-        image_id, _, etiquettes, env = docker.images["sha256:id-radarr"]
-        docker.images["sha256:id-radarr"] = (image_id, ["sha256:neuve"], etiquettes, env)
+        self.assertEqual(docker.conteneur("radarr").image_id, "sha256:image-neuve")
         return moteur, docker
 
     def test_mise_a_jour_note_de_quoi_revenir(self):
@@ -368,8 +385,10 @@ class ImagesDeSecours(unittest.TestCase):
         moteur, docker = self.monter()
         self.vieillir(moteur, 30)
         # une autre version attend, et le conteneur est bloqué : l'image d'avant peut resservir
-        image_id, _, etiquettes, env = docker.images["sha256:id-radarr"]
-        docker.images["sha256:id-radarr"] = (image_id, ["sha256:autre"], etiquettes, env)
+        image_id = docker.conteneur("radarr").image_id
+        _, _, etiquettes, env = docker.images[image_id]
+        docker.images[image_id] = (image_id, ["sha256:autre"], etiquettes, env)
+        moteur.registre.image = "sha256:image-suivante"
         moteur.etat.bloquer("radarr", "installation", "la nouvelle ne marche pas")
         moteur.passe()
         self.assertNotIn(f"supprimer {self.SECOURS}", docker.actions)

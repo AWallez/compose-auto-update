@@ -11,6 +11,7 @@ Les deux sortes de manuel :
     manuelle réussit.
 """
 
+import contextlib
 import json
 import os
 import tempfile
@@ -22,26 +23,51 @@ HISTORIQUE_MAX = 20
 
 # Pour chaque raison de blocage, la marche à suivre affichée sur la carte.
 CONSEILS = {
-    "telechargement": "Le registre n'a pas répondu, rien n'a été installé. Relance la mise à "
-                      "jour depuis la page ; si l'échec persiste, vérifie que l'image existe "
-                      "toujours à cette adresse.",
+    "telechargement": "Le téléchargement a échoué (registre injoignable, image introuvable, "
+                      "disque plein…) : rien n'a été installé, le service tourne toujours sur "
+                      "l'ancienne version. Lis l'erreur et corrige-la si besoin. Relance ensuite "
+                      "la mise à jour depuis la page.",
     "installation": "La nouvelle version ne fonctionnait pas : l'ancienne version et ses données "
                     "ont été remises en place. Lis les notes de version avant de réessayer.",
+    "preparation": "La mise à jour n'a pas pu commencer : l'arrêt du conteneur, la copie de ses "
+                   "données ou la mise de côté de l'ancienne image a échoué (disque plein, dossier "
+                   "de données introuvable…). Rien n'a été installé : l'ancienne version a été "
+                   "relancée, ses données n'ont pas été touchées. Lis l'erreur, corrige-la, puis "
+                   "relance la mise à jour depuis la page.",
     "majeure": "Une version majeure peut changer la configuration ou les données. Lis les notes "
                "de version, puis lance la mise à jour depuis la page quand tu es prêt.",
     "retour_arriere": "URGENT : le retour à l'ancienne version a lui aussi échoué, le service est "
                       "peut-être arrêté. Les données d'avant la mise à jour sont dans le dossier "
                       "des copies.",
+    "interrompue": "URGENT : une mise à jour a été interrompue en cours de route (redémarrage de "
+                   "la machine, arrêt du service, manque de mémoire…). Le service est peut-être "
+                   "arrêté, ou tourne sur la nouvelle version sans qu'elle ait été vérifiée. "
+                   "Vérifie-le ; les données d'avant la mise à jour sont dans le dossier des "
+                   "copies. Relance ensuite la mise à jour depuis la page : sa réussite lève le "
+                   "blocage.",
     "code": "Le dépôt contient du code qui n'est pas encore en service. L'outil ne reconstruit "
             "qu'avec le code déjà déployé : déploie cette version avec ton outil habituel, et "
             "le blocage se lèvera tout seul à la passe suivante.",
     "construction": "La reconstruction de l'image a échoué, rien n'a été installé : le service "
                     "tourne toujours sur l'ancienne image. Lis l'erreur, puis relance la mise à "
                     "jour depuis la page.",
+    "image_inchangee": "Le téléchargement a réussi mais n'a rien changé : le service tourne "
+                       "toujours sur l'ancienne version, et ses données n'ont pas été touchées. "
+                       "Vérifie que le fichier compose désigne bien cette image (même nom, même "
+                       "étiquette) et qu'aucun miroir de registre ne sert une version en retard, "
+                       "puis relance la mise à jour depuis la page.",
     "controle": "Le contrôle prévu avant l'installation a échoué : rien n'a été touché, le service "
                 "tourne toujours sur l'ancienne version. Corrige ce qu'il signale (souvent la "
                 "configuration), puis relance la mise à jour depuis la page.",
 }
+
+
+class EtatIllisible(Exception):
+    """Le fichier d'état existe mais ne se lit pas.
+
+    ⚠️ PAS UNE ValueError : le point d'entrée traite celles-ci comme une erreur
+    de saisie (code 2, sans signal de vie), et cette panne-là doit se voir.
+    """
 
 
 def maintenant():
@@ -53,7 +79,13 @@ class Etat:
         self.chemin = Path(chemin)
         self.donnees = {"format": FORMAT, "derniere_passe": None, "conteneurs": {}}
         if self.chemin.exists():
-            self.donnees = json.loads(self.chemin.read_text(encoding="utf-8"))
+            try:
+                donnees = json.loads(self.chemin.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as erreur:
+                raise EtatIllisible(f"état illisible ({self.chemin}) : {erreur}") from None
+            if not isinstance(donnees, dict) or not isinstance(donnees.get("conteneurs"), dict):
+                raise EtatIllisible(f"état illisible ({self.chemin}) : contenu inattendu")
+            self.donnees = donnees
 
     def conteneur(self, nom):
         """Le suivi d'un conteneur, créé vide à la première rencontre."""
@@ -126,7 +158,14 @@ class Etat:
         for chemin in (self.chemin, *map(Path, copies)):
             chemin.parent.mkdir(parents=True, exist_ok=True)
             descripteur, temporaire = tempfile.mkstemp(dir=chemin.parent, prefix=".etat-")
-            with os.fdopen(descripteur, "w", encoding="utf-8") as fichier:
-                fichier.write(texte)
-            os.chmod(temporaire, 0o644)
-            os.replace(temporaire, chemin)
+            try:
+                with os.fdopen(descripteur, "w", encoding="utf-8") as fichier:
+                    fichier.write(texte)
+                os.chmod(temporaire, 0o644)
+                os.replace(temporaire, chemin)
+            except BaseException:
+                # ⚠️ Disque plein : sans ce ménage, chaque passe laissait un
+                # fichier temporaire de plus à côté de l'état.
+                with contextlib.suppress(OSError):
+                    os.unlink(temporaire)
+                raise

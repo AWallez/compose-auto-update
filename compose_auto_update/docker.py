@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from .commande import executer
+from .commande import ErreurCommande, executer
 
 journal = logging.getLogger(__name__)
 
@@ -75,11 +75,28 @@ class Docker:
         return _lire(json.loads(executer(["docker", "inspect", "--type", "container", nom]))[0])
 
     def tous(self):
-        """Tous les conteneurs en marche, lus en un seul appel à `docker inspect`."""
+        """Tous les conteneurs en marche, lus en un seul appel à `docker inspect`.
+
+        ⚠️ UN CONTENEUR PEUT DISPARAÎTRE ENTRE LES DEUX COMMANDES : un « docker run
+        --rm » qui se termine à ce moment-là. Un seul absent fait échouer l'appel
+        groupé, et avec lui toute la passe. On reprend alors un par un, en sautant
+        les disparus ; toute autre erreur remonte.
+        """
         noms = executer(["docker", "ps", "--format", "{{.Names}}"]).split()
         if not noms:
             return []
-        return [_lire(b) for b in json.loads(executer(["docker", "inspect", "--type", "container", *noms]))]
+        try:
+            bruts = json.loads(executer(["docker", "inspect", "--type", "container", *noms]))
+        except ErreurCommande:
+            bruts = []
+            for nom in noms:
+                try:
+                    bruts += json.loads(executer(["docker", "inspect", "--type", "container", nom]))
+                except ErreurCommande as erreur:
+                    if "no such" not in erreur.erreur.lower():
+                        raise
+                    journal.info("%s : disparu pendant la lecture, ignoré", nom)
+        return [_lire(b) for b in bruts]
 
     def image(self, reference_ou_id):
         """Identifiant, empreintes connues, étiquettes et environnement d'une image locale.

@@ -84,19 +84,25 @@ class Registre:
         téléchargée (« sha256:… » de `docker image inspect`). Il permet de savoir,
         sans rien télécharger, si l'image de CETTE machine a vraiment changé.
         """
-        manifeste = self._json(ref, f"manifests/{empreinte}", TYPES_MANIFESTE)
-        if manifeste.get("mediaType") in TYPES_INDEX or "manifests" in manifeste:
-            systeme, architecture = plateforme.split("/", 1)
-            choix = [m for m in manifeste.get("manifests", [])
-                     if m.get("platform", {}).get("os") == systeme
-                     and m.get("platform", {}).get("architecture") == architecture]
-            if not choix:
-                raise ErreurRegistre(f"{ref} : aucune image pour {plateforme}")
-            manifeste = self._json(ref, f"manifests/{choix[0]['digest']}", TYPES_MANIFESTE)
-        identifiant = manifeste["config"]["digest"]
-        config = self._json(ref, f"blobs/{identifiant}", "*/*")
-        contenu = config.get("config") or {}
-        return contenu.get("Labels") or {}, contenu.get("Env") or [], identifiant
+        # ⚠️ UN MANIFESTE INATTENDU EST UNE ERREUR DE REGISTRE, PAS UN PLANTAGE.
+        # Une KeyError n'est pas une erreur d'examen : elle arrêtait la passe
+        # entière, pour tous les conteneurs, à cause d'une seule image exotique.
+        try:
+            manifeste = self._json(ref, f"manifests/{empreinte}", TYPES_MANIFESTE)
+            if manifeste.get("mediaType") in TYPES_INDEX or "manifests" in manifeste:
+                systeme, architecture = plateforme.split("/", 1)
+                choix = [m for m in manifeste.get("manifests", [])
+                         if m.get("platform", {}).get("os") == systeme
+                         and m.get("platform", {}).get("architecture") == architecture]
+                if not choix:
+                    raise ErreurRegistre(f"{ref} : aucune image pour {plateforme}")
+                manifeste = self._json(ref, f"manifests/{choix[0]['digest']}", TYPES_MANIFESTE)
+            identifiant = manifeste["config"]["digest"]
+            config = self._json(ref, f"blobs/{identifiant}", "*/*")
+            contenu = config.get("config") or {}
+            return contenu.get("Labels") or {}, contenu.get("Env") or [], identifiant
+        except (KeyError, TypeError, AttributeError) as erreur:
+            raise ErreurRegistre(f"{ref} : manifeste inattendu, rien de lisible ({erreur!r})") from None
 
     def version_par_etiquettes(self, ref, empreinte, essais=10):
         """La version d'une image qui n'en déclare aucune, retrouvée par ses autres noms.

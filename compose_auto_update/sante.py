@@ -7,6 +7,7 @@ redémarrages immobile, sonde de santé Docker au vert si l'image en a une, puis
 réponse HTTP si la configuration donne une adresse.
 """
 
+import http.client
 import logging
 import time
 import urllib.error
@@ -66,7 +67,13 @@ def _repond(adresse, delai, pas, attendre, horloge):
         except urllib.error.HTTPError as reponse:
             reponse.close()          # l'erreur porte la connexion : on la referme
             return True, ""
-        except (urllib.error.URLError, TimeoutError, OSError) as erreur:
-            derniere = str(erreur)
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as erreur:
+            # ⚠️ Une réponse qui n'est pas du HTTP (BadStatusLine…) n'est pas une
+            # réponse. Non rattrapée, elle traversait toute la passe : pas de
+            # retour arrière, et la nouvelle version restait en place.
+            derniere = str(erreur) or type(erreur).__name__
+        except ValueError as erreur:
+            # Adresse mal écrite (sans « http:// ») : attendre n'y changera rien.
+            return False, f"adresse de vérification invalide : {adresse} ({erreur})"
         attendre(pas)
     return False, f"aucune réponse sur {adresse} en {delai} s ({derniere})"

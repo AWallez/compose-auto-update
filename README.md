@@ -27,7 +27,7 @@ Pour chaque conteneur, un à la fois :
 3. **Téléchargement** (ou **reconstruction**), pendant que l'ancien conteneur continue de tourner. En cas d'échec, nouveaux essais 5 minutes puis 30 minutes plus tard, sans retarder les autres conteneurs. Puis le **contrôle** prévu, s'il y en a un : s'il échoue, rien n'est touché.
 4. **Arrêt, puis copie instantanée** des dossiers de données listés (reflink btrfs : aucun octet recopié).
 5. **Recréation** à partir de la définition compose d'origine.
-6. **Vérification** : le conteneur tourne encore après une minute, sans avoir redémarré, sa sonde de santé Docker est au vert s'il en a une, et il répond en HTTP si une adresse est donnée.
+6. **Vérification** : le conteneur tourne encore après une minute, sans avoir redémarré, sa sonde de santé Docker est au vert s'il en a une, et il répond en HTTP si une adresse est donnée. Si une image téléchargée ne change pas l'image en service, la mise à jour est annulée et signalée.
 7. **Si ça casse : retour arrière.** Les anciennes données reviennent (les données abîmées sont mises de côté, jamais supprimées), l'ancienne image est remise, et on vérifie qu'elle repart.
 
 Après au moins une mise à jour réussie, les commandes listées dans `apres_mise_a_jour` sont lancées, par exemple pour qu'un tableau de bord relève les nouvelles versions tout de suite plutôt qu'au relevé suivant.
@@ -64,7 +64,7 @@ automatique ──(la mise à jour échoue)──▶ retour arrière
 
 Une montée de version majeure bloque aussi le conteneur jusqu'à ton accord. Sauf si l'étiquette de l'image fige déjà la majeure (`postgres:17-alpine`, `uptime-kuma:2`) : le changement ne peut alors pas arriver par là. `segments_majeurs = 2` rend l'outil plus prudent pour les logiciels dont le deuxième nombre compte : nginx 1.30 → 1.32 attend alors ton accord, 1.30.5 → 1.30.6 non.
 
-Un blocage se lève aussi tout seul quand le conteneur est à jour par un autre moyen (mise à jour à la main, redéploiement), sauf après un retour arrière échoué.
+Un blocage se lève aussi tout seul quand le conteneur est à jour par un autre moyen (mise à jour à la main, redéploiement), sauf après un retour arrière échoué ou une mise à jour interrompue.
 
 Le mode de chaque conteneur peut aussi être changé sans toucher à la configuration, par exemple depuis un tableau de bord : `mode NOM auto`, `mode NOM manuel`, ou `mode NOM defaut` pour revenir à la configuration. Ce choix prime sur le fichier.
 
@@ -132,7 +132,7 @@ Une seule notification par passe, et seulement s'il y a quelque chose à faire :
 |---|---|
 | Nouvelle version à valider à la main, nouveau conteneur, image à corriger, code à déployer | 3 |
 | Échec de téléchargement, de reconstruction, de contrôle ou d'installation | 4 |
-| Retour arrière lui-même échoué | 5 |
+| Retour arrière lui-même échoué, ou mise à jour interrompue en cours de route | 5 |
 
 Chaque nouvelle version n'est signalée qu'une fois : la clé est son empreinte.
 
@@ -161,7 +161,7 @@ systemctl daemon-reload
 systemctl enable --now compose-auto-update.timer
 ```
 
-Si un tableau de bord lit l'état, le **relevé** de la journée lui donne les nouvelles versions sans attendre la passe. Il ne télécharge, n'installe et ne notifie rien : il interroge les registres (de simples requêtes d'empreinte) et note ce qui attend. Facultatif :
+Si un tableau de bord lit l'état, le **relevé** de la journée lui donne les nouvelles versions sans attendre la passe. Il ne télécharge et n'installe rien, et ne notifie qu'une urgence, une mise à jour interrompue : il interroge les registres (de simples requêtes d'empreinte) et note ce qui attend. Facultatif :
 
 ```bash
 cp systemd/compose-auto-update-releve.* /etc/systemd/system/
@@ -176,7 +176,7 @@ Le relevé note son heure dans `dernier_releve` et ne touche jamais `derniere_pa
 | Commande | Effet |
 |---|---|
 | `verifier` | Ce qui serait fait. Ne télécharge et ne modifie rien. |
-| `releve` | Note les versions disponibles dans l'état, pour un tableau de bord. N'installe et ne notifie rien. |
+| `releve` | Note les versions disponibles dans l'état, pour un tableau de bord. N'installe rien, et ne notifie qu'une mise à jour interrompue. |
 | `passe` | La passe complète, celle que lance la minuterie. |
 | `appliquer NOM` | Met un conteneur à jour tout de suite, même bloqué ou face à une majeure, jamais avec un code non déployé. |
 | `mode NOM auto\|manuel\|defaut` | Bascule un conteneur ; `defaut` rend la main à la configuration. |

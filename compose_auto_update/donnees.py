@@ -36,21 +36,32 @@ class Copie:
 
 
 def copier(chemins, racine, nom, horodatage, simulation=False):
-    """Copie chaque chemin dans racine/<nom>/<horodatage>/."""
+    """Copie chaque chemin dans racine/<nom>/<horodatage>/.
+
+    ⚠️ TOUT OU RIEN. Une copie à moitié faite (disque plein, dossier
+    introuvable) est effacée : elle ne servirait à aucun retour arrière, et
+    `elaguer` la compterait parmi les copies gardées, à la place d'une bonne.
+    """
     dossier = Path(racine) / nom / horodatage
+    deja_la = dossier.exists()
     copie = Copie(dossier)
-    for numero, chemin in enumerate(chemins):
-        original = Path(chemin)
-        if not original.exists():
-            raise FileNotFoundError(f"donnée à copier introuvable : {original}")
-        # un numéro devant le nom : deux dossiers « config » ne s'écrasent pas
-        destination = dossier / f"{numero}-{original.name}"
-        copie.paires.append((original, destination))
-        if simulation:
-            journal.info("simulation, non copié : %s", original)
-            continue
-        dossier.mkdir(parents=True, exist_ok=True)
-        executer(["cp", "-a", "--reflink=always", str(original), str(destination)])
+    try:
+        for numero, chemin in enumerate(chemins):
+            original = Path(chemin)
+            if not original.exists():
+                raise FileNotFoundError(f"donnée à copier introuvable : {original}")
+            # un numéro devant le nom : deux dossiers « config » ne s'écrasent pas
+            destination = dossier / f"{numero}-{original.name}"
+            copie.paires.append((original, destination))
+            if simulation:
+                journal.info("simulation, non copié : %s", original)
+                continue
+            dossier.mkdir(parents=True, exist_ok=True)
+            executer(["cp", "-a", "--reflink=always", str(original), str(destination)])
+    except BaseException:
+        if not simulation and not deja_la and dossier.exists():
+            shutil.rmtree(dossier, ignore_errors=True)
+        raise
     return copie
 
 
