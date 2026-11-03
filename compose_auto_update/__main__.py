@@ -25,7 +25,7 @@ import sys
 
 from . import config as configuration
 from .docker import Docker
-from .etat import Etat
+from .etat import Etat, EtatIllisible
 from .moteur import ERREURS_EXAMEN, Moteur
 from .notifier import Notificateur
 from .registre import Registre
@@ -57,6 +57,12 @@ def verrou(chemin=VERROU):
         except BlockingIOError:
             raise PasseEnCours() from None
         yield
+
+
+def creer_moteur(conf, notificateur, simulation):
+    """⚠️ Lit l'état : sous le verrou, pour toute commande qui l'écrit (voir `main`)."""
+    return Moteur(conf, Docker(simulation), Registre(conf.identifiants),
+                  Etat(conf.fichier_etat), notificateur, simulation)
 
 
 def verifier(moteur):
@@ -145,20 +151,24 @@ def main(argv=None):
         journal.error("%s", erreur)
         return 2
 
-    if args.commande == "etat":
-        return afficher_etat(Etat(conf.fichier_etat))
-
     simulation = args.simulation or args.commande == "verifier"
     notificateur = Notificateur(conf.ntfy_url, conf.ntfy_sujet, conf.ntfy_jeton,
                                 conf.lien, conf.kuma_push, simulation)
-    moteur = Moteur(conf, Docker(simulation), Registre(conf.identifiants),
-                    Etat(conf.fichier_etat), notificateur, simulation)
 
-    if args.commande == "verifier":
-        return verifier(moteur)
+    try:
+        if args.commande == "etat":
+            return afficher_etat(Etat(conf.fichier_etat))
+        if args.commande == "verifier":
+            return verifier(creer_moteur(conf, notificateur, simulation))
+    except EtatIllisible as erreur:
+        journal.error("%s", erreur)
+        return 1
 
     try:
         with verrou():
+            # ⚠️ L'ÉTAT EST LU SOUS LE VERROU. Lu avant, il pourrait dater d'avant la
+            # fin d'une autre passe, que cette commande effacerait en l'écrivant.
+            moteur = creer_moteur(conf, notificateur, simulation)
             if args.commande == "mode":
                 moteur.choisir_mode(args.nom, None if args.choix == "defaut" else args.choix)
                 journal.info("%s : mode %s enregistré", args.nom, args.choix)
@@ -172,6 +182,13 @@ def main(argv=None):
     except PasseEnCours:
         journal.error("une autre passe est en cours, réessaie dans quelques minutes")
         return 3
+    except EtatIllisible as erreur:
+        # ⚠️ Rien n'est fait tant qu'il n'est pas réparé : repartir d'un état vide
+        # oublierait les blocages, dont ceux qui protègent un service fragile.
+        journal.error("%s ; rien n'est fait tant qu'il n'est pas réparé", erreur)
+        if args.commande == "passe":
+            notificateur.signal_de_vie(False, str(erreur))
+        return 1
     except ValueError as erreur:
         journal.error("%s", erreur)          # nom de conteneur ou mode inconnu : erreur de saisie
         return 2

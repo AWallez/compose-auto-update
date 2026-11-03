@@ -61,6 +61,14 @@ CONSEILS = {
 }
 
 
+class EtatIllisible(Exception):
+    """Le fichier d'état existe mais ne se lit pas.
+
+    ⚠️ PAS UNE ValueError : le point d'entrée traite celles-ci comme une erreur
+    de saisie (code 2, sans signal de vie), et cette panne-là doit se voir.
+    """
+
+
 def maintenant():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -70,7 +78,13 @@ class Etat:
         self.chemin = Path(chemin)
         self.donnees = {"format": FORMAT, "derniere_passe": None, "conteneurs": {}}
         if self.chemin.exists():
-            self.donnees = json.loads(self.chemin.read_text(encoding="utf-8"))
+            try:
+                donnees = json.loads(self.chemin.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as erreur:
+                raise EtatIllisible(f"état illisible ({self.chemin}) : {erreur}") from None
+            if not isinstance(donnees, dict) or not isinstance(donnees.get("conteneurs"), dict):
+                raise EtatIllisible(f"état illisible ({self.chemin}) : contenu inattendu")
+            self.donnees = donnees
 
     def conteneur(self, nom):
         """Le suivi d'un conteneur, créé vide à la première rencontre."""

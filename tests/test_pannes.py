@@ -5,6 +5,7 @@ disque plein…) et vérifie qu'elle est soit rattrapée, soit signalée, mais
 jamais présentée comme une réussite ni laissée à mi-chemin.
 """
 
+import contextlib
 import dataclasses
 import errno
 import http.client
@@ -17,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from compose_auto_update import donnees, sante
+from compose_auto_update.__main__ import main
 from compose_auto_update.commande import ErreurCommande
 from compose_auto_update.etat import Etat
 from compose_auto_update.image import analyser
@@ -379,6 +381,61 @@ class CopieAMoitieFaite(unittest.TestCase):
         (racine / "radarr" / "20261102-071500").mkdir(parents=True)
         self.copier(racine)
         self.assertTrue((racine / "radarr" / "20261102-071500").is_dir())
+
+
+class PointDEntree(unittest.TestCase):
+    """`python3 -m compose_auto_update`, sans Docker ni réseau."""
+
+    def configurer(self, etat):
+        dossier = Path(tempfile.mkdtemp())
+        (dossier / "etat.json").write_text(etat, encoding="utf-8")
+        config = dossier / "config.toml"
+        config.write_text(f"""[general]
+fichier_etat = "{dossier / 'etat.json'}"
+dossier_copies = "{dossier / 'copies'}"
+
+[notifications]
+kuma_push = "http://kuma.invalid/api/push/x"
+
+[[conteneur]]
+nom = "radarr"
+mode = "auto"
+""", encoding="utf-8")
+        os.chmod(config, 0o600)
+        return dossier / "etat.json", str(config)
+
+    def test_etat_illisible_signale_a_uptime_kuma(self):
+        # Avant : plantage avant tout signal de vie, chaque nuit, jusqu'à réparation
+        _, config = self.configurer('{"conteneurs": {"radarr": ')
+        with mock.patch("compose_auto_update.__main__.verrou", contextlib.nullcontext), \
+                mock.patch.object(Notificateur, "signal_de_vie") as signal:
+            self.assertEqual(main(["--config", config, "passe"]), 1)
+        ok, resume = signal.call_args.args
+        self.assertFalse(ok)
+        self.assertIn("illisible", resume)
+
+    def test_commande_etat_sur_un_etat_illisible(self):
+        _, config = self.configurer("[]")
+        self.assertEqual(main(["--config", config, "etat"]), 1)
+
+    def test_l_etat_est_lu_sous_le_verrou(self):
+        # Une autre passe finit, et libère le verrou, pendant que cette commande démarre :
+        # avant, l'état lu trop tôt écrasait le sien.
+        fichier, config = self.configurer('{"format": 1, "derniere_passe": null, "conteneurs": {}}')
+
+        @contextlib.contextmanager
+        def verrou_libere_par_une_autre_passe():
+            fichier.write_text('{"format": 1, "derniere_passe": {"fin": "passe d\'à côté"}, '
+                               '"conteneurs": {}}', encoding="utf-8")
+            yield
+
+        _, docker, _ = monter()
+        with mock.patch("compose_auto_update.__main__.verrou", verrou_libere_par_une_autre_passe), \
+                mock.patch("compose_auto_update.__main__.Docker", lambda simulation: docker):
+            self.assertEqual(main(["--config", config, "mode", "radarr", "manuel"]), 0)
+        enregistre = json.loads(fichier.read_text(encoding="utf-8"))
+        self.assertEqual(enregistre["derniere_passe"], {"fin": "passe d'à côté"})
+        self.assertEqual(enregistre["conteneurs"]["radarr"]["mode_choisi"], "manuel")
 
 
 class DisquePlein(unittest.TestCase):
