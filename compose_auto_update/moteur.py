@@ -778,6 +778,10 @@ class Moteur:
             copie = donnees.copier(n.conf.donnees, self.conf.dossier_copies,
                                    nom, horodatage, self.simulation)
             self.docker.etiqueter(c.image_id, self._etiquette_secours(c))
+            # Suivie dès qu'elle est posée, même si la suite échoue : sinon personne
+            # ne la supprimerait jamais (voir `_expirer_secours`).
+            self.etat.conteneur(nom)["secours"] = {"etiquette": self._etiquette_secours(c),
+                                                   "depuis": maintenant()}
             nouvelle_lancee, motif = True, "installation"
             self.docker.recreer(c)
             if self._image_inchangee(n):

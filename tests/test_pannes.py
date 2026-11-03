@@ -14,6 +14,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -185,6 +186,27 @@ class MiseAJourInterrompue(unittest.TestCase):
                 moteur.passe()
         self.assertNotIn("arreter radarr", docker.actions)
         self.assertIn("non commencée", moteur.notificateur.envois[0][1])
+
+
+class ImageDAvantApresUnEchec(unittest.TestCase):
+    """L'étiquette « :avant-maj » est posée avant la recréation, puis la mise à jour échoue.
+
+    Avant : rien ne la notait. Si le conteneur était ensuite mis à jour par un
+    autre moyen, l'image d'avant restait sur le disque pour toujours.
+    """
+
+    def test_suivie_puis_supprimee_a_l_echeance(self):
+        moteur, docker, _ = monter()
+        docker.etats_apres_recreation = ["exited", "running"]       # la neuve plante
+        moteur.passe()
+        suivi = moteur.etat.conteneur("radarr")
+        self.assertEqual(suivi["secours"]["etiquette"], "ghcr.io/linuxserver/radarr:avant-maj")
+        # Plus tard : débloqué par une mise à jour faite autrement, échéance passée
+        moteur.etat.debloquer("radarr")
+        suivi["secours"]["depuis"] = (datetime.now().astimezone()
+                                      - timedelta(days=8)).isoformat(timespec="seconds")
+        moteur._expirer_secours()
+        self.assertIn("supprimer ghcr.io/linuxserver/radarr:avant-maj", docker.actions)
 
 
 class ErreurImprevue(unittest.TestCase):
