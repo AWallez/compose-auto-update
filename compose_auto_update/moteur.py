@@ -760,7 +760,9 @@ class Moteur:
             self.docker.etiqueter(c.image_id, self._etiquette_secours(c))
             nouvelle_lancee = True
             self.docker.recreer(c)
-            ok, raison = self._verifier(n.conf)
+            ok, raison = self._image_remplacee(n)
+            if ok:
+                ok, raison = self._verifier(n.conf)
         except (ErreurCommande, OSError) as erreur:
             ok, raison = False, f"erreur pendant la mise à jour : {erreur}"
 
@@ -788,6 +790,22 @@ class Moteur:
         # toucher. Avant la recréation, elles sont intactes : rien à remettre.
         self._retour_arriere(n, copie if nouvelle_lancee else None, horodatage, raison, bilan)
         return False
+
+    def _image_remplacee(self, n):
+        """Le conteneur recréé tourne-t-il sur une autre image que l'ancienne ?
+
+        ⚠️ « PULL » RÉUSSI NE VEUT PAS DIRE IMAGE CHANGÉE. Un miroir de registre
+        en retard, ou un fichier compose qui désigne une autre image que celle du
+        conteneur, et Compose relance exactement l'ancienne. Sans ce contrôle,
+        c'était noté « mis à jour », sans notification, et recommencé chaque nuit.
+        Une image construite sur place a son propre contrôle (`_verifier_commit`).
+        """
+        if self.simulation or n.conf.construction:
+            return True, ""
+        if self.docker.conteneur(n.conf.nom).image_id != n.actuel.image_id:
+            return True, ""
+        return False, ("l'image en service n'a pas changé après le téléchargement : le fichier "
+                       "compose désigne-t-il bien cette image, et le registre est-il à jour ?")
 
     def _controler(self, n, bilan):
         """Lance le contrôle prévu sur la nouvelle image, l'ancienne tournant encore.

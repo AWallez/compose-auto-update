@@ -24,6 +24,40 @@ from compose_auto_update.registre import ErreurRegistre, Registre
 from .test_moteur import monter
 
 
+class TelechargementSansEffet(unittest.TestCase):
+    """« docker compose pull » réussit, mais l'image en service ne change pas.
+
+    Vu avec un miroir de registre en retard, un fichier compose qui désigne une
+    autre image que celle du conteneur, ou un service qui ne se télécharge pas.
+    Avant : « mis à jour 6.4.4 → 6.5.0 », sans notification (une réussite est
+    silencieuse), et le même arrêt-copie-recréation recommencé chaque nuit.
+    """
+
+    def test_n_est_pas_presente_comme_une_reussite(self):
+        moteur, docker, _ = monter()
+        docker.telechargement_sans_effet = True
+        bilan = moteur.passe()
+        self.assertEqual(bilan.mis_a_jour, [])
+        self.assertEqual(len(bilan.erreurs), 1)
+        self.assertIn("n'a pas changé", bilan.erreurs[0][1])
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "installation")
+        self.assertEqual(moteur.etat.conteneur("radarr")["version"], "6.4.4")
+        self.assertEqual(moteur.notificateur.envois[0][2], 4)      # tu es prévenu
+
+    def test_ne_recommence_pas_chaque_nuit(self):
+        moteur, docker, _ = monter()
+        docker.telechargement_sans_effet = True
+        moteur.passe()
+        arrets = docker.actions.count("arreter radarr")
+        moteur.passe()
+        self.assertEqual(docker.actions.count("arreter radarr"), arrets)
+
+    def test_une_vraie_mise_a_jour_passe_toujours(self):
+        moteur, docker, _ = monter()
+        self.assertEqual(len(moteur.passe().mis_a_jour), 1)
+        self.assertEqual(docker.conteneur("radarr").image_id, "sha256:image-neuve")
+
+
 class ReponseHttpEtrange(unittest.TestCase):
     """L'adresse de santé répond autre chose que du HTTP (BadStatusLine).
 
@@ -139,7 +173,6 @@ class DisquePlein(unittest.TestCase):
                 etat.sauver()
         self.assertEqual(sorted(p.name for p in dossier.iterdir()), ["etat.json"])
         self.assertEqual((dossier / "etat.json").read_text(encoding="utf-8"), avant)
-
 
 
 if __name__ == "__main__":
