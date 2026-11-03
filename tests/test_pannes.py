@@ -16,7 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from compose_auto_update import sante
+from compose_auto_update import donnees, sante
+from compose_auto_update.commande import ErreurCommande
 from compose_auto_update.etat import Etat
 from compose_auto_update.image import analyser
 from compose_auto_update.moteur import Moteur
@@ -322,6 +323,41 @@ class NotificationEtrange(unittest.TestCase):
         moteur.registre.version = "7.0.0"            # montée majeure : de quoi notifier
         moteur.passe()
         self.assertTrue(Path(moteur.conf.fichier_etat).exists())
+
+
+class CopieAMoitieFaite(unittest.TestCase):
+    """La copie des données échoue en route (disque plein, dossier introuvable).
+
+    Avant : la copie partielle restait, et comptait parmi les copies gardées.
+    Trois échecs de suite, et `elaguer` effaçait la dernière copie complète.
+    """
+
+    def copier(self, racine):
+        sources = Path(tempfile.mkdtemp())
+        for nom in ("config", "base"):
+            (sources / nom).mkdir()
+
+        def cp(arguments, *args, **kwargs):
+            destination = Path(arguments[-1])
+            if destination.name.endswith("base"):
+                raise ErreurCommande(arguments, 1, "cp: No space left on device")
+            destination.mkdir()
+
+        with mock.patch("compose_auto_update.donnees.executer", side_effect=cp):
+            with self.assertRaises(ErreurCommande):
+                donnees.copier([sources / "config", sources / "base"], racine, "radarr",
+                               "20261103-071500")
+
+    def test_la_copie_partielle_est_effacee(self):
+        racine = Path(tempfile.mkdtemp())
+        self.copier(racine)
+        self.assertFalse((racine / "radarr" / "20261103-071500").exists())
+
+    def test_les_copies_d_avant_restent(self):
+        racine = Path(tempfile.mkdtemp())
+        (racine / "radarr" / "20261102-071500").mkdir(parents=True)
+        self.copier(racine)
+        self.assertTrue((racine / "radarr" / "20261102-071500").is_dir())
 
 
 class DisquePlein(unittest.TestCase):
