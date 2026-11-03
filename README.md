@@ -27,7 +27,7 @@ Pour chaque conteneur, un à la fois :
 3. **Téléchargement** (ou **reconstruction**), pendant que l'ancien conteneur continue de tourner. En cas d'échec, nouveaux essais 5 minutes puis 30 minutes plus tard, sans retarder les autres conteneurs. Puis le **contrôle** prévu, s'il y en a un : s'il échoue, rien n'est touché.
 4. **Arrêt, puis copie instantanée** des dossiers de données listés (reflink btrfs : aucun octet recopié).
 5. **Recréation** à partir de la définition compose d'origine.
-6. **Vérification** : le conteneur tourne encore après une minute, sans avoir redémarré, sa sonde de santé Docker est au vert s'il en a une, et il répond en HTTP si une adresse est donnée.
+6. **Vérification** : le conteneur tourne encore après une minute, sans avoir redémarré, sa sonde de santé Docker est au vert s'il en a une, et il répond en HTTP si une adresse est donnée. Si une image téléchargée ne change pas l'image en service, la mise à jour est annulée et signalée.
 7. **Si ça casse : retour arrière.** Les anciennes données reviennent (les données abîmées sont mises de côté, jamais supprimées), l'ancienne image est remise, et on vérifie qu'elle repart.
 
 Après au moins une mise à jour réussie, les commandes listées dans `apres_mise_a_jour` sont lancées, par exemple pour qu'un tableau de bord relève les nouvelles versions tout de suite plutôt qu'au relevé suivant.
