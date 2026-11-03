@@ -20,6 +20,7 @@ from unittest import mock
 from compose_auto_update import donnees, sante
 from compose_auto_update.__main__ import main
 from compose_auto_update.commande import ErreurCommande
+from compose_auto_update.docker import Docker
 from compose_auto_update.etat import Etat
 from compose_auto_update.image import analyser
 from compose_auto_update.moteur import Moteur
@@ -381,6 +382,37 @@ class CopieAMoitieFaite(unittest.TestCase):
         (racine / "radarr" / "20261102-071500").mkdir(parents=True)
         self.copier(racine)
         self.assertTrue((racine / "radarr" / "20261102-071500").is_dir())
+
+
+class ConteneurDisparuPendantLaLecture(unittest.TestCase):
+    """Un « docker run --rm » qui se termine entre « docker ps » et « docker inspect ».
+
+    Avant : l'appel groupé échouait, et avec lui toute la passe de la nuit.
+    """
+
+    @staticmethod
+    def docker_qui_perd(disparu, message):
+        def executer(arguments, *args, **kwargs):
+            if arguments[:2] == ["docker", "ps"]:
+                return "radarr\npassager\n"
+            noms = arguments[4:]
+            if disparu in noms:
+                raise ErreurCommande(arguments, 1, message)
+            return json.dumps([{"Name": f"/{nom}", "Image": "sha256:x",
+                                "Config": {"Image": "ghcr.io/x/y:latest"},
+                                "State": {"Status": "running"}} for nom in noms])
+        return executer
+
+    def test_le_disparu_est_saute(self):
+        with mock.patch("compose_auto_update.docker.executer", side_effect=self.docker_qui_perd(
+                "passager", "Error: No such container: passager")):
+            self.assertEqual([c.nom for c in Docker().tous()], ["radarr"])
+
+    def test_une_autre_erreur_remonte(self):
+        with mock.patch("compose_auto_update.docker.executer", side_effect=self.docker_qui_perd(
+                "passager", "Cannot connect to the Docker daemon")):
+            with self.assertRaises(ErreurCommande):
+                Docker().tous()
 
 
 class PointDEntree(unittest.TestCase):
