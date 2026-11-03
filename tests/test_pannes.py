@@ -96,5 +96,33 @@ class ManifesteExotique(unittest.TestCase):
                 Registre().configuration(self.REF, "sha256:x", "linux/amd64")
 
 
+class NotificationEtrange(unittest.TestCase):
+    """Une notification qui échoue ne doit jamais faire échouer la passe (notifier.py).
+
+    Avant : une réponse non HTTP ou une adresse mal écrite levait une exception
+    hors de la liste attendue. La passe s'arrêtait avant d'enregistrer l'état,
+    alors que les mises à jour avaient eu lieu.
+    """
+
+    def test_reponse_non_http(self):
+        n = Notificateur("http://ntfy.invalid", "sujet", kuma_push="http://kuma.invalid/push")
+        with mock.patch("compose_auto_update.notifier.urllib.request.urlopen",
+                        side_effect=http.client.BadStatusLine("x")):
+            self.assertFalse(n.envoyer("titre", "message"))
+            n.signal_de_vie(True, "ok")              # ne lève rien
+
+    def test_adresse_sans_protocole(self):
+        n = Notificateur("ntfy.exemple", "sujet", kuma_push="kuma.exemple/push")
+        self.assertFalse(n.envoyer("titre", "message"))
+        n.signal_de_vie(True, "ok")
+
+    def test_la_passe_enregistre_l_etat_malgre_tout(self):
+        moteur, _, _ = monter()
+        moteur.notificateur = Notificateur("ntfy.exemple", "sujet")
+        moteur.registre.version = "7.0.0"            # montée majeure : de quoi notifier
+        moteur.passe()
+        self.assertTrue(Path(moteur.conf.fichier_etat).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

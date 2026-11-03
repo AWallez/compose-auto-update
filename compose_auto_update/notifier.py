@@ -6,6 +6,7 @@ et le signal de vie sert de filet : si la passe ne s'est pas signalée, c'est
 Uptime Kuma qui prévient.
 """
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -13,6 +14,12 @@ import urllib.parse
 import urllib.request
 
 journal = logging.getLogger(__name__)
+
+# Tout ce qu'un envoi peut lever. ⚠️ Une réponse qui n'est pas du HTTP
+# (HTTPException) et une adresse mal écrite (ValueError) en font partie : non
+# rattrapées, elles arrêtaient la passe avant l'enregistrement de l'état.
+ECHECS_RESEAU = (urllib.error.URLError, TimeoutError, OSError,
+                 http.client.HTTPException, ValueError)
 
 
 class Notificateur:
@@ -43,15 +50,15 @@ class Notificateur:
         if self.simulation:
             journal.info("simulation, notification non envoyée : %s\n%s", titre, message)
             return False
-        requete = urllib.request.Request(self.ntfy_url, data=json.dumps(corps).encode(),
-                                         method="POST",
-                                         headers={"Content-Type": "application/json"})
-        if self.jeton:
-            requete.add_header("Authorization", f"Bearer {self.jeton}")
         try:
+            requete = urllib.request.Request(self.ntfy_url, data=json.dumps(corps).encode(),
+                                             method="POST",
+                                             headers={"Content-Type": "application/json"})
+            if self.jeton:
+                requete.add_header("Authorization", f"Bearer {self.jeton}")
             with urllib.request.urlopen(requete, timeout=self.delai) as reponse:
                 return 200 <= reponse.status < 300
-        except (urllib.error.URLError, TimeoutError, OSError) as erreur:
+        except ECHECS_RESEAU as erreur:
             journal.error("notification ntfy impossible : %s", erreur)
             return False
 
@@ -71,5 +78,5 @@ class Notificateur:
         try:
             with urllib.request.urlopen(f"{self.kuma_push}?{parametres}", timeout=self.delai):
                 pass
-        except (urllib.error.URLError, TimeoutError, OSError) as erreur:
+        except ECHECS_RESEAU as erreur:
             journal.error("signal de vie vers Uptime Kuma impossible : %s", erreur)
