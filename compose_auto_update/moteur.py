@@ -75,6 +75,7 @@ class Bilan:
     avertissements: list = field(default_factory=list)  # (nom, message, clé)
     locaux: list = field(default_factory=list)          # (nom, raison) : images maison non suivies
     urgent: bool = False
+    interrompu: bool = False   # une mise à jour d'avant n'est pas allée au bout
 
     def resume(self):
         return (f"{len(self.mis_a_jour)} mise(s) à jour, {len(self.erreurs)} erreur(s), "
@@ -484,6 +485,7 @@ class Moteur:
         a_installer = []
         a_traiter = self.conteneurs_a_traiter()
         self._signaler_locaux(bilan)
+        self._signaler_interrompues(bilan)
         for cc in a_traiter:
             if cc.decouvert and not self.etat.deja_notifie(cc.nom, CLE_DECOUVERTE):
                 bilan.nouveaux.append((cc.nom, self._texte_decouverte(cc), CLE_DECOUVERTE))
@@ -549,7 +551,12 @@ class Moteur:
         ⚠️ `derniere_passe` N'EST PAS TOUCHÉE. Un tableau de bord juge sur elle
         que la passe a bien eu lieu : rafraîchie par le relevé, elle masquerait
         une passe en panne. Le relevé note sa propre heure, `dernier_releve`.
+
+        ⚠️ UNE SEULE EXCEPTION AU SILENCE : une mise à jour interrompue. Le
+        service est peut-être arrêté, l'alerte n'attend pas la passe du lendemain.
         """
+        bilan = Bilan()
+        self._signaler_interrompues(bilan)
         attendent = 0
         for cc in self.conteneurs_a_traiter():
             try:
@@ -562,6 +569,8 @@ class Moteur:
                 journal.info("%s : %s → %s disponible", cc.nom,
                              n.version_actuelle or "?", n.version_nouvelle or "?")
         self.etat.donnees["dernier_releve"] = {"fin": maintenant(), "disponibles": attendent}
+        if bilan.erreurs:
+            self._prevenir(bilan)
         if not self.simulation:
             self.etat.sauver(*self.conf.exports)
         return attendent
@@ -637,10 +646,11 @@ class Moteur:
 
         C'est le cas après une mise à jour faite par un autre moyen, ou un
         redéploiement par ton outil habituel.
-        ⚠️ Sauf un retour arrière échoué : être à jour ne dit pas que le service marche.
+        ⚠️ Sauf un retour arrière échoué ou une mise à jour interrompue : être à
+        jour ne dit pas que le service marche.
         """
         blocage = self.etat.blocage(nom)
-        if blocage and blocage["raison"] != "retour_arriere":
+        if blocage and blocage["raison"] not in ("retour_arriere", "interrompue"):
             self.etat.debloquer(nom)
 
     def _telecharger_et_installer(self, a_installer, bilan):
@@ -750,6 +760,15 @@ class Moteur:
         if n.conf.controle and not self._controler(n, bilan):
             return False
         horodatage = datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            self._marquer_en_cours(n)
+        except OSError as erreur:
+            # Sans marque sur le disque, une coupure en route passerait inaperçue :
+            # on ne touche à rien (disque plein, le plus souvent).
+            message = f"mise à jour non commencée, l'état ne peut pas être écrit : {erreur}"
+            journal.error("%s : %s", nom, message)
+            bilan.erreurs.append((nom, message, n.empreinte))
+            return False
         copie, nouvelle_lancee, motif = None, False, "installation"
         try:
             self.docker.arreter(c)
@@ -793,6 +812,7 @@ class Moteur:
                                 self.conf.copies_conservees, self.simulation)
             except OSError as erreur:
                 journal.warning("%s : anciennes copies non supprimées : %s", nom, erreur)
+            self._fin_en_cours(nom)
             return True
 
         journal.error("%s : %s ; retour à l'ancienne version", nom, raison)
@@ -801,7 +821,67 @@ class Moteur:
         # intactes : rien à remettre.
         self._retour_arriere(n, copie if nouvelle_lancee else None, horodatage, raison, bilan,
                              motif)
+        self._fin_en_cours(nom)
         return False
+
+    def _marquer_en_cours(self, n):
+        """⚠️ ÉCRITE SUR LE DISQUE AVANT DE TOUCHER AU CONTENEUR.
+
+        Si le programme est tué en route, la passe ou le relevé suivant trouve
+        cette marque et prévient (voir `_signaler_interrompues`). Seul le
+        fichier d'état est écrit, pas ses copies : un tableau de bord
+        injoignable ne doit pas empêcher les mises à jour.
+        """
+        suivi = self.etat.conteneur(n.conf.nom)
+        suivi["en_cours"] = {"depuis": maintenant(), "de": n.version_actuelle,
+                             "vers": n.version_nouvelle, "cle": n.empreinte}
+        if self.simulation:
+            return
+        try:
+            self.etat.sauver()
+        except OSError:
+            del suivi["en_cours"]
+            raise
+
+    def _fin_en_cours(self, nom):
+        """La mise à jour est allée au bout, réussie ou non : la marque est retirée."""
+        self.etat.conteneur(nom).pop("en_cours", None)
+        if self.simulation:
+            return
+        try:
+            self.etat.sauver()
+        except OSError as erreur:
+            # La fin de la passe réessaiera ; au pire, une alerte de trop demain.
+            journal.warning("%s : état non enregistré après la mise à jour : %s", nom, erreur)
+
+    def _signaler_interrompues(self, bilan):
+        """⚠️ UNE MISE À JOUR INTERROMPUE N'EST JAMAIS SILENCIEUSE.
+
+        Le programme peut être tué en pleine mise à jour : redémarrage de la
+        machine, arrêt du service, manque de mémoire. Avant, la passe suivante
+        prenait le conteneur arrêté pour un arrêt voulu, ou la nouvelle version
+        jamais vérifiée pour une version à jour, et ne disait rien.
+        Rien n'est tenté seul : on ne sait pas où la mise à jour s'est arrêtée.
+        Le conteneur est bloqué, et l'alerte repart tant qu'elle n'est pas partie.
+        """
+        for nom, suivi in self.etat.donnees["conteneurs"].items():
+            marque = suivi.pop("en_cours", None)
+            if marque:
+                message = (f"la mise à jour {marque.get('de') or '?'} → {marque.get('vers') or '?'} "
+                           f"commencée le {marque.get('depuis', '?')} ne s'est pas terminée "
+                           f"(programme arrêté en cours de route) : vérifie le service")
+                journal.critical("%s : %s", nom, message)
+                self.etat.bloquer(nom, "interrompue", message)
+                if marque.get("cle"):
+                    # L'alerte couvre cette version : pas de « à faire à la main » en plus.
+                    # Sans risque de silence, l'alerte a sa propre clé (ci-dessous).
+                    self.etat.marquer_notifie(nom, marque["cle"])
+            blocage = suivi.get("blocage")
+            if blocage and blocage["raison"] == "interrompue":
+                cle = f"interrompue:{blocage['depuis']}"
+                if not self.etat.deja_notifie(nom, cle):
+                    bilan.erreurs.append((nom, blocage["message"], cle))
+                    bilan.interrompu = True
 
     def _image_inchangee(self, n):
         """Vrai si le conteneur recréé tourne encore sur l'ancienne image.
@@ -896,6 +976,7 @@ class Moteur:
         """
         cc = self._trouver(nom)
         bilan = Bilan()
+        self._signaler_interrompues(bilan)
         n = self.examiner(cc)
         if n is None:
             journal.info("%s : déjà à jour", nom)
@@ -976,17 +1057,19 @@ class Moteur:
         self.etat.donnees["derniere_passe"] = {"fin": maintenant(), "bilan": bilan.resume()}
         if bilan.mis_a_jour:
             self._apres_mise_a_jour()
+        self._prevenir(bilan)
+        if not self.simulation:
+            self.etat.sauver(*self.conf.exports)
 
-        # ⚠️ Une clé n'est marquée « signalée » qu'une fois la notification
-        # réellement partie. Si ntfy est injoignable, on réessaiera à la passe suivante.
+    def _prevenir(self, bilan):
+        """⚠️ Une clé n'est marquée « signalée » qu'une fois la notification
+        réellement partie. Si ntfy est injoignable, on réessaiera à la passe suivante."""
         if self._notifier(bilan):
             for nom, *_, cle in [*bilan.erreurs, *bilan.en_attente,
                                  *bilan.nouveaux, *bilan.avertissements]:
                 if cle:
                     self.etat.marquer_notifie(nom, cle)
             self.etat.donnees.setdefault("locaux_signales", []).extend(nom for nom, _ in bilan.locaux)
-        if not self.simulation:
-            self.etat.sauver(*self.conf.exports)
 
     def _apres_mise_a_jour(self):
         """Lance les commandes prévues après une mise à jour réussie.
@@ -1027,6 +1110,8 @@ class Moteur:
 
         if bilan.urgent:
             titre, priorite = "Mises à jour : retour arrière ÉCHOUÉ", 5
+        elif bilan.interrompu:
+            titre, priorite = "Mises à jour : mise à jour INTERROMPUE", 5
         elif bilan.erreurs:
             titre, priorite = f"Mises à jour : {len(bilan.erreurs)} erreur(s)", 4
         else:

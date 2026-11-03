@@ -33,6 +33,12 @@ CONSEILS = {
     "retour_arriere": "URGENT : le retour à l'ancienne version a lui aussi échoué, le service est "
                       "peut-être arrêté. Les données d'avant la mise à jour sont dans le dossier "
                       "des copies.",
+    "interrompue": "URGENT : une mise à jour a été interrompue en cours de route (redémarrage de "
+                   "la machine, arrêt du service, manque de mémoire…). Le service est peut-être "
+                   "arrêté, ou tourne sur la nouvelle version sans qu'elle ait été vérifiée. "
+                   "Vérifie-le ; les données d'avant la mise à jour sont dans le dossier des "
+                   "copies. Relance ensuite la mise à jour depuis la page : sa réussite lève le "
+                   "blocage.",
     "code": "Le dépôt contient du code qui n'est pas encore en service. L'outil ne reconstruit "
             "qu'avec le code déjà déployé : déploie cette version avec ton outil habituel, et "
             "le blocage se lèvera tout seul à la passe suivante.",

@@ -5,6 +5,7 @@ disque plein…) et vérifie qu'elle est soit rattrapée, soit signalée, mais
 jamais présentée comme une réussite ni laissée à mi-chemin.
 """
 
+import dataclasses
 import errno
 import http.client
 import json
@@ -18,6 +19,7 @@ from unittest import mock
 from compose_auto_update import sante
 from compose_auto_update.etat import Etat
 from compose_auto_update.image import analyser
+from compose_auto_update.moteur import Moteur
 from compose_auto_update.notifier import Notificateur
 from compose_auto_update.registre import ErreurRegistre, Registre
 
@@ -78,6 +80,107 @@ class TelechargementSansEffet(unittest.TestCase):
         moteur, docker, _ = monter()
         self.assertEqual(len(moteur.passe().mis_a_jour), 1)
         self.assertEqual(docker.conteneur("radarr").image_id, "sha256:image-neuve")
+
+
+class MiseAJourInterrompue(unittest.TestCase):
+    """Le programme tué net en pleine mise à jour : redémarrage, arrêt du service, manque de mémoire.
+
+    Avant : rien ne le disait, jamais. La passe suivante prenait le conteneur
+    arrêté pour un arrêt voulu, et la nouvelle version jamais vérifiée pour une
+    version à jour. SystemExit joue ici le rôle du signal : rien ne le rattrape.
+    """
+
+    @staticmethod
+    def suivant(moteur, docker):
+        """Le programme suivant : il relit l'état sur le disque, comme après un redémarrage."""
+        return Moteur(moteur.conf, docker, moteur.registre, Etat(moteur.conf.fichier_etat),
+                      moteur.notificateur, attendre=lambda secondes: None)
+
+    def tuer_apres_l_arret(self):
+        moteur, docker, _ = monter()
+        arreter = docker.arreter
+
+        def arreter_puis_tuer(c):
+            arreter(c)
+            docker.conteneurs[c.nom] = dataclasses.replace(docker.conteneurs[c.nom], etat="exited")
+            raise SystemExit("tué")
+
+        docker.arreter = arreter_puis_tuer
+        with self.assertRaises(SystemExit):
+            moteur.passe()
+        docker.arreter = arreter
+        return self.suivant(moteur, docker), docker
+
+    def tuer_pendant_la_verification(self):
+        moteur, docker, _ = monter()
+        recreer = docker.recreer
+
+        def recreer_puis_tuer(c):
+            recreer(c)        # la nouvelle version tourne, mal : elle redémarre en boucle
+            docker.conteneurs[c.nom] = dataclasses.replace(docker.conteneurs[c.nom], etat="restarting")
+            raise SystemExit("tué")
+
+        docker.recreer = recreer_puis_tuer
+        with self.assertRaises(SystemExit):
+            moteur.passe()
+        docker.recreer = recreer
+        return self.suivant(moteur, docker), docker
+
+    def test_conteneur_laisse_arrete_alerte_urgente(self):
+        moteur, docker = self.tuer_apres_l_arret()
+        bilan = moteur.passe()
+        self.assertTrue(bilan.interrompu)
+        titre, message, priorite = moteur.notificateur.envois[0]
+        self.assertEqual(priorite, 5)
+        self.assertIn("INTERROMPUE", titre)
+        self.assertIn("6.4.4 → 6.5.0", message)
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "interrompue")
+        self.assertEqual(docker.conteneur("radarr").etat, "exited")     # rien n'est tenté seul
+
+    def test_version_jamais_verifiee_alerte_une_fois_et_reste_bloquee(self):
+        moteur, _ = self.tuer_pendant_la_verification()
+        moteur.passe()
+        self.assertEqual(moteur.notificateur.envois[0][2], 5)
+        moteur.passe()                    # « à jour », mais rien ne dit qu'elle marche
+        self.assertEqual(len(moteur.notificateur.envois), 1)
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "interrompue")
+
+    def test_le_releve_de_la_journee_n_attend_pas_la_passe(self):
+        moteur, _ = self.tuer_apres_l_arret()
+        moteur.releve()
+        self.assertEqual(moteur.notificateur.envois[0][2], 5)
+        moteur.passe()
+        self.assertEqual(len(moteur.notificateur.envois), 1)          # pas deux fois
+
+    def test_la_page_leve_le_blocage(self):
+        moteur, _ = self.tuer_pendant_la_verification()
+        moteur.passe()
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "interrompue")
+        moteur.appliquer("radarr")        # tu as vérifié : la version est déjà là
+        self.assertIsNone(moteur.etat.blocage("radarr"))
+
+    def test_marque_sur_le_disque_avant_l_arret_et_retiree_apres(self):
+        moteur, docker, _ = monter()
+        lu, arreter = [], docker.arreter
+
+        def arreter_en_lisant_l_etat(c):
+            lu.append(json.loads(Path(moteur.conf.fichier_etat).read_text(encoding="utf-8")))
+            arreter(c)
+
+        docker.arreter = arreter_en_lisant_l_etat
+        moteur.passe()
+        self.assertEqual(lu[0]["conteneurs"]["radarr"]["en_cours"]["vers"], "6.5.0")
+        fin = json.loads(Path(moteur.conf.fichier_etat).read_text(encoding="utf-8"))
+        self.assertNotIn("en_cours", fin["conteneurs"]["radarr"])
+
+    def test_sans_marque_possible_rien_n_est_touche(self):
+        moteur, docker, _ = monter()
+        disque_plein = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        with mock.patch.object(Etat, "sauver", side_effect=disque_plein):
+            with self.assertRaises(OSError):          # l'état de fin de passe non plus
+                moteur.passe()
+        self.assertNotIn("arreter radarr", docker.actions)
+        self.assertIn("non commencée", moteur.notificateur.envois[0][1])
 
 
 class ErreurImprevue(unittest.TestCase):

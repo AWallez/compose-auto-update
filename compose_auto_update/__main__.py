@@ -103,6 +103,9 @@ def afficher_etat(etat):
             ligne += "  (découvert)"
         if suivi.get("disponible"):
             ligne += f"  → {suivi['disponible'].get('version') or '?'} disponible"
+        if suivi.get("en_cours"):
+            ligne += (f"\n{'':30}MISE À JOUR EN COURS, OU INTERROMPUE, "
+                      f"depuis le {suivi['en_cours'].get('depuis', '?')}")
         if suivi.get("blocage"):
             ligne += f"\n{'':30}BLOQUÉ ({suivi['blocage']['raison']}) : {suivi['blocage']['message']}"
         precedente = suivi.get("precedente")
