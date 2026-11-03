@@ -39,6 +39,11 @@ CONSEILS = {
     "construction": "La reconstruction de l'image a échoué, rien n'a été installé : le service "
                     "tourne toujours sur l'ancienne image. Lis l'erreur, puis relance la mise à "
                     "jour depuis la page.",
+    "image_inchangee": "Le téléchargement a réussi mais n'a rien changé : le service tourne "
+                       "toujours sur l'ancienne version, et ses données n'ont pas été touchées. "
+                       "Vérifie que le fichier compose désigne bien cette image (même nom, même "
+                       "étiquette) et qu'aucun miroir de registre ne sert une version en retard, "
+                       "puis relance la mise à jour depuis la page.",
     "controle": "Le contrôle prévu avant l'installation a échoué : rien n'a été touché, le service "
                 "tourne toujours sur l'ancienne version. Corrige ce qu'il signale (souvent la "
                 "configuration), puis relance la mise à jour depuis la page.",

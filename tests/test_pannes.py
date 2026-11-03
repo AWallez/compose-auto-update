@@ -31,6 +31,8 @@ class TelechargementSansEffet(unittest.TestCase):
     autre image que celle du conteneur, ou un service qui ne se télécharge pas.
     Avant : « mis à jour 6.4.4 → 6.5.0 », sans notification (une réussite est
     silencieuse), et le même arrêt-copie-recréation recommencé chaque nuit.
+    Maintenant : échec signalé, blocage avec sa propre marche à suivre, et les
+    données laissées telles quelles, puisque la nouvelle version n'a jamais tourné.
     """
 
     def test_n_est_pas_presente_comme_une_reussite(self):
@@ -40,9 +42,29 @@ class TelechargementSansEffet(unittest.TestCase):
         self.assertEqual(bilan.mis_a_jour, [])
         self.assertEqual(len(bilan.erreurs), 1)
         self.assertIn("n'a pas changé", bilan.erreurs[0][1])
-        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "installation")
+        blocage = moteur.etat.blocage("radarr")
+        self.assertEqual(blocage["raison"], "image_inchangee")
+        self.assertIn("fichier compose", blocage["conseil"])       # pas « lis les notes de version »
         self.assertEqual(moteur.etat.conteneur("radarr")["version"], "6.4.4")
         self.assertEqual(moteur.notificateur.envois[0][2], 4)      # tu es prévenu
+
+    def test_les_donnees_ne_sont_pas_restaurees(self):
+        # Seule l'ancienne version a tourné : restaurer effacerait ses dernières écritures
+        moteur, docker, _ = monter()
+        docker.telechargement_sans_effet = True
+        with mock.patch("compose_auto_update.moteur.donnees") as donnees:
+            moteur.passe()
+        donnees.copier.assert_called_once()
+        donnees.restaurer.assert_not_called()
+        self.assertEqual(docker.conteneur("radarr").image_id, "sha256:id-radarr")
+
+    def test_temoin_une_nouvelle_version_cassee_restaure_les_donnees(self):
+        moteur, docker, _ = monter()
+        docker.etats_apres_recreation = ["exited", "running"]
+        with mock.patch("compose_auto_update.moteur.donnees") as donnees:
+            moteur.passe()
+        donnees.restaurer.assert_called_once()
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "installation")
 
     def test_ne_recommence_pas_chaque_nuit(self):
         moteur, docker, _ = monter()

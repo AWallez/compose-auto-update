@@ -750,7 +750,7 @@ class Moteur:
         if n.conf.controle and not self._controler(n, bilan):
             return False
         horodatage = datetime.now().strftime("%Y%m%d-%H%M%S")
-        copie, nouvelle_lancee = None, False
+        copie, nouvelle_lancee, motif = None, False, "installation"
         try:
             self.docker.arreter(c)
             # ⚠️ Arrêter AVANT de copier : copier une base de données en pleine
@@ -760,8 +760,12 @@ class Moteur:
             self.docker.etiqueter(c.image_id, self._etiquette_secours(c))
             nouvelle_lancee = True
             self.docker.recreer(c)
-            ok, raison = self._image_remplacee(n)
-            if ok:
+            if self._image_inchangee(n):
+                # ⚠️ RIEN N'A ÉTÉ INSTALLÉ : Compose a relancé l'ancienne image. La
+                # nouvelle version n'a jamais tourné, les données sont intactes.
+                nouvelle_lancee, motif = False, "image_inchangee"
+                ok, raison = False, "le téléchargement n'a pas changé l'image en service"
+            else:
                 ok, raison = self._verifier(n.conf)
         except (ErreurCommande, OSError) as erreur:
             ok, raison = False, f"erreur pendant la mise à jour : {erreur}"
@@ -787,12 +791,14 @@ class Moteur:
 
         journal.error("%s : %s ; retour à l'ancienne version", nom, raison)
         # Les données ne sont restaurées que si la nouvelle version a pu les
-        # toucher. Avant la recréation, elles sont intactes : rien à remettre.
-        self._retour_arriere(n, copie if nouvelle_lancee else None, horodatage, raison, bilan)
+        # toucher. Avant la recréation, ou si l'image n'a pas changé, elles sont
+        # intactes : rien à remettre.
+        self._retour_arriere(n, copie if nouvelle_lancee else None, horodatage, raison, bilan,
+                             motif)
         return False
 
-    def _image_remplacee(self, n):
-        """Le conteneur recréé tourne-t-il sur une autre image que l'ancienne ?
+    def _image_inchangee(self, n):
+        """Vrai si le conteneur recréé tourne encore sur l'ancienne image.
 
         ⚠️ « PULL » RÉUSSI NE VEUT PAS DIRE IMAGE CHANGÉE. Un miroir de registre
         en retard, ou un fichier compose qui désigne une autre image que celle du
@@ -801,11 +807,8 @@ class Moteur:
         Une image construite sur place a son propre contrôle (`_verifier_commit`).
         """
         if self.simulation or n.conf.construction:
-            return True, ""
-        if self.docker.conteneur(n.conf.nom).image_id != n.actuel.image_id:
-            return True, ""
-        return False, ("l'image en service n'a pas changé après le téléchargement : le fichier "
-                       "compose désigne-t-il bien cette image, et le registre est-il à jour ?")
+            return False
+        return self.docker.conteneur(n.conf.nom).image_id == n.actuel.image_id
 
     def _controler(self, n, bilan):
         """Lance le contrôle prévu sur la nouvelle image, l'ancienne tournant encore.
@@ -831,8 +834,11 @@ class Moteur:
         bilan.erreurs.append((nom, message, n.empreinte))
         return False
 
-    def _retour_arriere(self, n, copie, horodatage, raison, bilan):
-        """Remet l'ancienne image, et les anciennes données si la nouvelle version a tourné."""
+    def _retour_arriere(self, n, copie, horodatage, raison, bilan, motif="installation"):
+        """Remet l'ancienne image, et les anciennes données si la nouvelle version a tourné.
+
+        `motif` est la raison du blocage posé si l'ancienne version repart.
+        """
         nom, c = n.conf.nom, n.actuel
         try:
             try:
@@ -851,7 +857,7 @@ class Moteur:
             ok, raison_retour = False, str(erreur)
 
         if ok:
-            self.etat.bloquer(nom, "installation", raison)
+            self.etat.bloquer(nom, motif, raison)
             bilan.erreurs.append((nom, f"{raison} ; ancienne version remise en place", n.empreinte))
         else:
             journal.critical("%s : RETOUR ARRIÈRE ÉCHOUÉ : %s", nom, raison_retour)
