@@ -23,9 +23,10 @@ HISTORIQUE_MAX = 20
 
 # Pour chaque raison de blocage, la marche à suivre affichée sur la carte.
 CONSEILS = {
-    "telechargement": "Le registre n'a pas répondu, rien n'a été installé. Relance la mise à "
-                      "jour depuis la page ; si l'échec persiste, vérifie que l'image existe "
-                      "toujours à cette adresse.",
+    "telechargement": "Le téléchargement a échoué (registre injoignable, image introuvable, "
+                      "disque plein…) : rien n'a été installé, le service tourne toujours sur "
+                      "l'ancienne version. Lis l'erreur et corrige-la si besoin. Relance ensuite "
+                      "la mise à jour depuis la page.",
     "installation": "La nouvelle version ne fonctionnait pas : l'ancienne version et ses données "
                     "ont été remises en place. Lis les notes de version avant de réessayer.",
     "preparation": "La mise à jour n'a pas pu commencer : l'arrêt du conteneur, la copie de ses "

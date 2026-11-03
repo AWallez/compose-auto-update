@@ -328,6 +328,29 @@ class NotificationEtrange(unittest.TestCase):
         self.assertTrue(Path(moteur.conf.fichier_etat).exists())
 
 
+class TelechargementSurDisquePlein(unittest.TestCase):
+    """« docker compose pull » échoue faute de place sur le disque.
+
+    Avant : le conseil affirmait « Le registre n'a pas répondu », et envoyait
+    chercher la panne du mauvais côté.
+    """
+
+    def test_le_conseil_ne_suppose_pas_la_cause(self):
+        moteur, docker, _ = monter()
+
+        def telecharger(c):
+            raise ErreurCommande(["docker", "compose", "pull"], 1,
+                                 "write /var/lib/docker/tmp: no space left on device")
+
+        docker.telecharger = telecharger
+        moteur.passe()
+        blocage = moteur.etat.blocage("radarr")
+        self.assertEqual(blocage["raison"], "telechargement")
+        self.assertIn("no space left", blocage["erreur"])
+        self.assertIn("disque plein", blocage["conseil"])
+        self.assertNotIn("n'a pas répondu", blocage["conseil"])
+
+
 class EchecAvantLaRecreation(unittest.TestCase):
     """L'arrêt ou la copie des données échoue : la nouvelle version n'a jamais tourné.
 
