@@ -24,6 +24,51 @@ from compose_auto_update.registre import ErreurRegistre, Registre
 from .test_moteur import monter
 
 
+class ReponseHttpEtrange(unittest.TestCase):
+    """L'adresse de santé répond autre chose que du HTTP (BadStatusLine).
+
+    Avant : l'exception traversait la vérification, puis toute la passe. Pas de
+    retour arrière, la nouvelle version laissée en place, l'état non enregistré.
+    """
+
+    def test_retour_arriere_au_lieu_d_un_arret_en_route(self):
+        moteur, docker, _ = monter()
+        moteur.conf.delai_sante = 1
+        moteur.conf.conteneurs[0].sante = "http://radarr.invalid:7878/"
+        moteur.attendre = lambda secondes: time.sleep(0.05)
+
+        def ouvrir(*args, **kwargs):
+            # La nouvelle image répond n'importe quoi, l'ancienne répond bien
+            if docker.conteneur("radarr").image_id == "sha256:image-neuve":
+                raise http.client.BadStatusLine("SSH-2.0-OpenSSH")
+            return mock.MagicMock()
+
+        ouvreur = mock.Mock(open=mock.Mock(side_effect=ouvrir))
+        with mock.patch("compose_auto_update.sante.urllib.request.build_opener",
+                        return_value=ouvreur):
+            bilan = moteur.passe()
+        self.assertEqual(bilan.mis_a_jour, [])
+        self.assertFalse(bilan.urgent)
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "installation")
+        self.assertEqual(docker.conteneur("radarr").image_id, "sha256:id-radarr")
+        enregistre = json.loads(Path(moteur.conf.fichier_etat).read_text(encoding="utf-8"))
+        self.assertEqual(enregistre["conteneurs"]["radarr"]["blocage"]["raison"], "installation")
+
+    def test_reponse_non_http_n_est_pas_une_reponse(self):
+        horloge = iter(range(100)).__next__
+        ouvreur = mock.Mock(open=mock.Mock(side_effect=http.client.BadStatusLine("x")))
+        with mock.patch("compose_auto_update.sante.urllib.request.build_opener",
+                        return_value=ouvreur):
+            ok, raison = sante._repond("http://x.invalid/", 5, 1, lambda s: None, horloge)
+        self.assertFalse(ok)
+        self.assertIn("aucune réponse", raison)
+
+    def test_adresse_invalide_echoue_sans_exception(self):
+        ok, raison = sante._repond("radarr", 5, 1, lambda s: None, iter(range(100)).__next__)
+        self.assertFalse(ok)
+        self.assertIn("radarr", raison)
+
+
 class ManifesteExotique(unittest.TestCase):
     """Un registre qui renvoie un manifeste sans « config » (ancien format v1, artefact…).
 
