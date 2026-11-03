@@ -124,5 +124,23 @@ class NotificationEtrange(unittest.TestCase):
         self.assertTrue(Path(moteur.conf.fichier_etat).exists())
 
 
+class DisquePlein(unittest.TestCase):
+    """L'état ne peut pas être écrit : l'ancien reste intact, et rien ne traîne à côté."""
+
+    def test_aucun_fichier_temporaire_abandonne(self):
+        dossier = Path(tempfile.mkdtemp())
+        etat = Etat(dossier / "etat.json")
+        etat.sauver()
+        avant = (dossier / "etat.json").read_text(encoding="utf-8")
+        etat.noter("radarr", "test")
+        with mock.patch("compose_auto_update.etat.os.replace",
+                        side_effect=OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))):
+            with self.assertRaises(OSError):
+                etat.sauver()
+        self.assertEqual(sorted(p.name for p in dossier.iterdir()), ["etat.json"])
+        self.assertEqual((dossier / "etat.json").read_text(encoding="utf-8"), avant)
+
+
+
 if __name__ == "__main__":
     unittest.main()

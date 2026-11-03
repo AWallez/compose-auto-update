@@ -11,6 +11,7 @@ Les deux sortes de manuel :
     manuelle réussit.
 """
 
+import contextlib
 import json
 import os
 import tempfile
@@ -126,7 +127,14 @@ class Etat:
         for chemin in (self.chemin, *map(Path, copies)):
             chemin.parent.mkdir(parents=True, exist_ok=True)
             descripteur, temporaire = tempfile.mkstemp(dir=chemin.parent, prefix=".etat-")
-            with os.fdopen(descripteur, "w", encoding="utf-8") as fichier:
-                fichier.write(texte)
-            os.chmod(temporaire, 0o644)
-            os.replace(temporaire, chemin)
+            try:
+                with os.fdopen(descripteur, "w", encoding="utf-8") as fichier:
+                    fichier.write(texte)
+                os.chmod(temporaire, 0o644)
+                os.replace(temporaire, chemin)
+            except BaseException:
+                # ⚠️ Disque plein : sans ce ménage, chaque passe laissait un
+                # fichier temporaire de plus à côté de l'état.
+                with contextlib.suppress(OSError):
+                    os.unlink(temporaire)
+                raise
