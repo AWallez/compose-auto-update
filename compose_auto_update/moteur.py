@@ -769,6 +769,12 @@ class Moteur:
                 ok, raison = self._verifier(n.conf)
         except (ErreurCommande, OSError) as erreur:
             ok, raison = False, f"erreur pendant la mise à jour : {erreur}"
+        except Exception as erreur:
+            # ⚠️ FILET : UNE ERREUR IMPRÉVUE NE LAISSE JAMAIS LE SERVICE ARRÊTÉ.
+            # Avant, elle traversait la passe : ni retour arrière, ni état
+            # enregistré. La trace complète reste au journal : le bogue n'est pas caché.
+            journal.exception("%s : erreur imprévue pendant la mise à jour", nom)
+            ok, raison = False, f"erreur imprévue pendant la mise à jour : {erreur!r}"
 
         if ok:
             journal.info("%s : mis à jour, %s → %s", nom, n.version_actuelle, n.version_nouvelle)
@@ -855,6 +861,10 @@ class Moteur:
             ok, raison_retour = self._verifier(n.conf)
         except (ErreurCommande, OSError) as erreur:
             ok, raison_retour = False, str(erreur)
+        except Exception as erreur:
+            # Même filet qu'à l'installation : l'alerte urgente part quoi qu'il arrive.
+            journal.exception("%s : erreur imprévue pendant le retour arrière", nom)
+            ok, raison_retour = False, f"erreur imprévue : {erreur!r}"
 
         if ok:
             self.etat.bloquer(nom, motif, raison)

@@ -80,6 +80,47 @@ class TelechargementSansEffet(unittest.TestCase):
         self.assertEqual(docker.conteneur("radarr").image_id, "sha256:image-neuve")
 
 
+class ErreurImprevue(unittest.TestCase):
+    """Une exception que personne n'attendait, au milieu d'une mise à jour (un bogue).
+
+    Avant : elle traversait la passe. Le service restait arrêté ou sur la
+    nouvelle version, sans retour arrière, et l'état n'était pas enregistré.
+    """
+
+    def monter(self, echecs):
+        moteur, docker, _ = monter()
+        recreer, appels = docker.recreer, []
+
+        def recreer_avec_bogue(c):
+            appels.append(c.nom)
+            if len(appels) <= echecs:
+                raise RuntimeError("bogue imprévu")
+            recreer(c)
+
+        docker.recreer = recreer_avec_bogue
+        return moteur, docker, appels
+
+    def test_retour_arriere_et_trace_gardee_au_journal(self):
+        moteur, docker, appels = self.monter(echecs=1)
+        with self.assertLogs("compose_auto_update.moteur", "ERROR") as journal:
+            bilan = moteur.passe()
+        self.assertEqual(len(appels), 2)                            # l'ancienne a été recréée
+        self.assertEqual(docker.conteneur("radarr").image_id, "sha256:id-radarr")
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "installation")
+        self.assertIn("bogue imprévu", bilan.erreurs[0][1])
+        self.assertTrue(any(r.exc_info for r in journal.records))   # le bogue n'est pas caché
+        enregistre = json.loads(Path(moteur.conf.fichier_etat).read_text(encoding="utf-8"))
+        self.assertIsNotNone(enregistre["conteneurs"]["radarr"]["blocage"])
+
+    def test_retour_arriere_impossible_alerte_urgente(self):
+        moteur, _, _ = self.monter(echecs=2)
+        with self.assertLogs("compose_auto_update.moteur", "ERROR"):
+            bilan = moteur.passe()
+        self.assertTrue(bilan.urgent)
+        self.assertEqual(moteur.etat.blocage("radarr")["raison"], "retour_arriere")
+        self.assertEqual(moteur.notificateur.envois[0][2], 5)
+
+
 class ReponseHttpEtrange(unittest.TestCase):
     """L'adresse de santé répond autre chose que du HTTP (BadStatusLine).
 
