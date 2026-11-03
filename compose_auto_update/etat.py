@@ -28,6 +28,11 @@ CONSEILS = {
                       "toujours à cette adresse.",
     "installation": "La nouvelle version ne fonctionnait pas : l'ancienne version et ses données "
                     "ont été remises en place. Lis les notes de version avant de réessayer.",
+    "preparation": "La mise à jour n'a pas pu commencer : l'arrêt du conteneur, la copie de ses "
+                   "données ou la mise de côté de l'ancienne image a échoué (disque plein, dossier "
+                   "de données introuvable…). Rien n'a été installé : l'ancienne version a été "
+                   "relancée, ses données n'ont pas été touchées. Lis l'erreur, corrige-la, puis "
+                   "relance la mise à jour depuis la page.",
     "majeure": "Une version majeure peut changer la configuration ou les données. Lis les notes "
                "de version, puis lance la mise à jour depuis la page quand tu es prêt.",
     "retour_arriere": "URGENT : le retour à l'ancienne version a lui aussi échoué, le service est "

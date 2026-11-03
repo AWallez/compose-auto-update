@@ -325,6 +325,27 @@ class NotificationEtrange(unittest.TestCase):
         self.assertTrue(Path(moteur.conf.fichier_etat).exists())
 
 
+class EchecAvantLaRecreation(unittest.TestCase):
+    """L'arrêt ou la copie des données échoue : la nouvelle version n'a jamais tourné.
+
+    Avant : blocage « installation », dont le conseil disait que la nouvelle
+    version ne fonctionnait pas, et qu'il fallait lire ses notes de version.
+    """
+
+    def test_conseil_exact_et_donnees_intactes(self):
+        moteur, docker, _ = monter()
+        disque_plein = ErreurCommande(["cp"], 1, "cp: No space left on device")
+        with mock.patch("compose_auto_update.donnees.copier", side_effect=disque_plein), \
+                mock.patch("compose_auto_update.donnees.restaurer") as restaurer:
+            bilan = moteur.passe()
+        blocage = moteur.etat.blocage("radarr")
+        self.assertEqual(blocage["raison"], "preparation")
+        self.assertIn("Rien n'a été installé", blocage["conseil"])
+        self.assertIn("No space left", bilan.erreurs[0][1])
+        restaurer.assert_not_called()
+        self.assertEqual(docker.conteneur("radarr").image_id, "sha256:id-radarr")
+
+
 class CopieAMoitieFaite(unittest.TestCase):
     """La copie des données échoue en route (disque plein, dossier introuvable).
 

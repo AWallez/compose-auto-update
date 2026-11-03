@@ -769,7 +769,8 @@ class Moteur:
             journal.error("%s : %s", nom, message)
             bilan.erreurs.append((nom, message, n.empreinte))
             return False
-        copie, nouvelle_lancee, motif = None, False, "installation"
+        # Jusqu'à la recréation, un échec n'a rien installé : motif « preparation ».
+        copie, nouvelle_lancee, motif = None, False, "preparation"
         try:
             self.docker.arreter(c)
             # ⚠️ Arrêter AVANT de copier : copier une base de données en pleine
@@ -777,7 +778,7 @@ class Moteur:
             copie = donnees.copier(n.conf.donnees, self.conf.dossier_copies,
                                    nom, horodatage, self.simulation)
             self.docker.etiqueter(c.image_id, self._etiquette_secours(c))
-            nouvelle_lancee = True
+            nouvelle_lancee, motif = True, "installation"
             self.docker.recreer(c)
             if self._image_inchangee(n):
                 # ⚠️ RIEN N'A ÉTÉ INSTALLÉ : Compose a relancé l'ancienne image. La
