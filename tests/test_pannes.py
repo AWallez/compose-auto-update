@@ -295,6 +295,26 @@ class ReponseHttpEtrange(unittest.TestCase):
         self.assertIn("radarr", raison)
 
 
+class AdresseDeVerificationMalEcrite(unittest.TestCase):
+    """`sante = "radarr:7878"`, sans « http:// » : la vérification ne peut jamais réussir.
+
+    Avant : rien ne le disait avant la première mise à jour, ratée à coup sûr.
+    """
+
+    def test_signalee_une_fois_a_corriger(self):
+        moteur, _, _ = monter(deja_a_jour=True)
+        moteur.conf.conteneurs[0].sante = "radarr:7878"
+        bilan = moteur.passe()
+        self.assertEqual(len(bilan.avertissements), 1)
+        self.assertIn("http://", bilan.avertissements[0][1])
+        self.assertEqual(moteur.passe().avertissements, [])
+
+    def test_une_bonne_adresse_ne_dit_rien(self):
+        moteur, _, _ = monter(deja_a_jour=True)
+        moteur.conf.conteneurs[0].sante = "http://127.0.0.1:7878/"
+        self.assertEqual(moteur.passe().avertissements, [])
+
+
 class ManifesteExotique(unittest.TestCase):
     """Un registre qui renvoie un manifeste sans « config » (ancien format v1, artefact…).
 

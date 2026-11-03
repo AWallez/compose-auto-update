@@ -14,6 +14,7 @@ Ensuite tout est commun : arrêt, copie, recréation, vérification, retour arri
 
 import logging
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,15 @@ CLE_LSCR = "avertissement:lscr.io"
 
 # Ce qui peut faire échouer l'examen d'UN conteneur sans arrêter la passe.
 ERREURS_EXAMEN = (ErreurRegistre, ErreurCommande, ErreurConstruction)
+
+
+def _adresse_http(adresse):
+    """Vrai pour une adresse que la vérification sait joindre : « http(s)://hôte… »."""
+    try:
+        morceaux = urllib.parse.urlsplit(adresse)
+    except ValueError:
+        return False
+    return morceaux.scheme in ("http", "https") and bool(morceaux.netloc)
 
 
 def _texte(erreur):
@@ -183,6 +193,12 @@ class Moteur:
         suivi["mode"] = self.mode_effectif(cc)
         suivi["decouvert"] = cc.decouvert
         suivi["avertissements"] = []
+        if cc.sante and not _adresse_http(cc.sante):
+            # ⚠️ Sinon on ne le découvre qu'à la première mise à jour, ratée à coup sûr.
+            suivi["avertissements"].append({"cle": f"sante:{cc.sante}", "message": (
+                f"l'adresse de vérification « {cc.sante} » n'est pas une adresse http:// ou "
+                f"https:// complète : chaque mise à jour échouerait à la vérification. "
+                f"Corrige « sante » dans la configuration")})
         if "secours" not in suivi:
             self._adopter_secours(suivi, actuel)
         if cc.construction:
